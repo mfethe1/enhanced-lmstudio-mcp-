@@ -1,0 +1,19 @@
+# Enhanced LM Studio MCP Server Dependencies
+
+# Core HTTP client libraries
+requests==2.32.3
+# aiohttp optional; left unpinned unless we switch to async I/O fully
+
+# Development and testing tools
+pytest>=7.0.0
+black>=22.0.0
+flake8>=5.0.0
+
+# Database and storage (SQLite is built-in to Python)
+# No additional dependencies needed for SQLite3
+
+# Additional utilities for enhanced functionality (stdlib modules are not listed in requirements)
+# pathlib, tempfile, subprocess, hashlib, re, glob, ast are part of Python standard library
+
+# Optional enhanced features
+typing-extensions>=4.0.0  # Extended typing support 

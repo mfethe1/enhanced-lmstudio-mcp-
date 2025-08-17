@@ -1,0 +1,16 @@
+{
+  "lm_studio": {
+    "url": "http://localhost:1234",
+    "model": "deepseek-r1-distill-qwen-7b",
+    "timeout": 120
+  },
+  "server": {
+    "max_memory_entries": 1000,
+    "code_execution_timeout": 30,
+    "temp_file_cleanup": true
+  },
+  "safety": {
+    "sandbox_execution": true,
+    "max_file_size": "10MB"
+  }
+}

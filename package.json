@@ -1,0 +1,66 @@
+﻿{
+    "name": "enhanced-lmstudio-mcp",
+    "version": "2.0.0",
+    "description": "Enhanced LM Studio MCP Server with advanced coding agent tools for iterative problem solving",
+    "main": "server.py",
+    "scripts": {
+        "start": "python server.py",
+        "test": "python -m pytest tests/",
+        "lint": "python -m flake8 server.py",
+        "format": "python -m black server.py"
+    },
+    "keywords": [
+        "mcp",
+        "model-context-protocol", 
+        "lm-studio",
+        "coding-agent",
+        "ai-tools",
+        "code-analysis",
+        "debugging",
+        "sequential-thinking"
+    ],
+    "author": "Enhanced MCP Development Team",
+    "license": "MIT",
+    "engines": {
+        "python": ">=3.8"
+    },
+    "dependencies": {
+        "requests": ">=2.28.0",
+        "aiohttp": ">=3.8.0"
+    },
+    "devDependencies": {
+        "pytest": ">=7.0.0",
+        "black": ">=22.0.0",
+        "flake8": ">=5.0.0"
+    },
+    "repository": {
+        "type": "git",
+        "url": "."
+    },
+    "mcp": {
+        "protocol_version": "2024-11-05",
+        "capabilities": [
+            "sequential_thinking",
+            "code_analysis", 
+            "code_execution",
+            "file_operations",
+            "memory_management",
+            "debugging_tools",
+            "testing_framework"
+        ],
+        "tools_count": 16,
+        "enhanced_features": {
+            "iterative_problem_solving": true,
+            "context_persistence": true,
+            "execution_safety": true,
+            "debugging_assistance": true,
+            "memory_management": true
+        }
+    },
+    "config": {
+        "lm_studio_url": "http://localhost:1234",
+        "model_name": "deepseek/deepseek-r1-0528-qwen3-8b",
+        "timeout_seconds": 120,
+        "max_memory_entries": 1000
+    }
+}
