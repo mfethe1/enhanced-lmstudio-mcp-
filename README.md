@@ -113,6 +113,35 @@ The server can be configured through environment variables:
 - `compact: true` to request shorter bullet lists and fewer tests
 - `code_only: true` (generate_tests) to return only test code (we post-process to extract fenced code when present)
 
+## Remote Agent Support (HTTP/WebSocket)
+
+- Enable with `REMOTE_ENABLED=true`
+- Bind address via `REMOTE_BIND` (default `0.0.0.0:8787`)
+- Optional Bearer auth via `MCP_REMOTE_TOKEN`
+- Rate limiting via `RATE_LIMIT_RPS` (default 10) and `RATE_LIMIT_BURST` (default 20)
+
+Endpoints:
+- POST /rpc: JSON-RPC wrapper around MCP tool calls. Example payload:
+  `{ "id": 1, "params": { "name": "deep_research", "arguments": { "query": "..." } } }`
+- WS /ws: JSON-RPC over WebSocket (persistent). If `MCP_REMOTE_TOKEN` is set, pass `?token=...`.
+
+### Storage backend
+- `STORAGE_BACKEND=sqlite` (default) or `postgres`
+- If postgres, set `POSTGRES_DSN` (e.g., `postgresql://user:pass@host:5432/db`)
+
+### Docker
+- Build: `docker build -t enhanced-lmstudio-mcp .`
+- Run: `docker run -e REMOTE_ENABLED=true -e MCP_REMOTE_TOKEN=changeme -p 8787:8787 enhanced-lmstudio-mcp`
+- Compose: `docker-compose up --build`
+
+Volume: `./data:/app/data` for persistent storage (SQLite)
+
+Security notes:
+- Always set MCP_REMOTE_TOKEN in production
+- Place behind TLS (proxy like Caddy/Nginx) and consider WAF rules
+- For scale-out, prefer Postgres backend and a load balancer
+
+
 ## 💡 Usage Examples
 
 ### Sequential Problem Solving
