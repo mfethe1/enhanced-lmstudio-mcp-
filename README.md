@@ -103,7 +103,7 @@ The server can be configured through environment variables:
 ### MCP Manager (Augment) setup
 - Command: `python`
 - Args: `server.py`
-- Working directory: `c:\\Users\\mfeth\\.mcp-servers\\lmstudio-mcp`
+- Working directory: `<project root>`
 - Do not auto-start server at OS boot. Let the MCP manager spawn it so stdin/stdout pipes are wired correctly.
 
 ### Health check
