@@ -1,0 +1,27 @@
+version: "3.9"
+services:
+  mcp:
+    build: .
+    image: enhanced-lmstudio-mcp:latest
+    container_name: enhanced-lmstudio-mcp
+    environment:
+      - REMOTE_ENABLED=${REMOTE_ENABLED:-true}
+      - REMOTE_BIND=${REMOTE_BIND:-0.0.0.0:8787}
+      - MCP_REMOTE_TOKEN=${MCP_REMOTE_TOKEN:-changeme}
+      - RATE_LIMIT_RPS=${RATE_LIMIT_RPS:-10}
+      - RATE_LIMIT_BURST=${RATE_LIMIT_BURST:-20}
+      - STORAGE_BACKEND=${STORAGE_BACKEND:-sqlite}
+      - POSTGRES_DSN=${POSTGRES_DSN:-}
+      - LM_STUDIO_URL=${LM_STUDIO_URL:-http://host.docker.internal:1234}
+      - MODEL_NAME=${MODEL_NAME:-openai/gpt-oss-20b}
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import server; print(server.handle_health_check({}, server.get_server_singleton()))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+

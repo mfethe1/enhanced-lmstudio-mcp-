@@ -16,4 +16,9 @@ flake8>=5.0.0
 # pathlib, tempfile, subprocess, hashlib, re, glob, ast are part of Python standard library
 
 # Optional enhanced features
-typing-extensions>=4.0.0  # Extended typing support 
+typing-extensions>=4.0.0  # Extended typing support
+
+# Remote server and Postgres backend
+fastapi>=0.111.0
+uvicorn>=0.30.0
+psycopg[binary]>=3.2.1

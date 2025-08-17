@@ -234,8 +234,18 @@ class EnhancedLMStudioMCPServer:
         self.model_name = os.getenv("MODEL_NAME", "openai/gpt-oss-20b")
         self.working_directory = os.getcwd()
 
-        # Initialize persistent storage
-        self.storage = MCPStorage()
+        # Initialize persistent storage (supports STORAGE_BACKEND=sqlite|postgres)
+        backend = os.getenv("STORAGE_BACKEND", "sqlite").strip().lower()
+        if backend == "postgres":
+            try:
+                from storage_postgres import MCPStoragePostgres
+                dsn = os.getenv("POSTGRES_DSN", "")
+                self.storage = MCPStoragePostgres(dsn=dsn)
+            except Exception as e:
+                logger.warning(f"Postgres storage unavailable ({e}); falling back to SQLite")
+                self.storage = MCPStorage()
+        else:
+            self.storage = MCPStorage()
         # Performance monitoring settings
         self.performance_threshold = float(os.getenv("PERFORMANCE_THRESHOLD", "0.2"))  # seconds
 
