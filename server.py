@@ -588,6 +588,31 @@ def get_all_tools():
                 "description": "Execute a workflow (mock execution)",
                 "inputSchema": {"type": "object", "properties": {"workflow_id": {"type": "string"}, "inputs": {"type": "object"}}, "required": ["workflow_id"]}
             },
+            {
+                "name": "agent_collaborate",
+                "description": "Run a simple multi-round, multi-role collaboration session and synthesize a plan.",
+                "inputSchema": {"type":"object","properties":{"task":{"type":"string"},"roles":{"type":"array","items":{"type":"string"},"default":["Researcher","Developer","Reviewer"]},"rounds":{"type":"integer","default":2}}, "required":["task"]}
+            },
+            {
+                "name": "reflect",
+                "description": "Critique and improve content using reflection loops.",
+                "inputSchema": {"type":"object","properties":{"content":{"type":"string"},"criteria":{"type":"string"},"rounds":{"type":"integer","default":1}}, "required":["content"]}
+            },
+            {
+                "name": "tool_match",
+                "description": "Suggest relevant MCP tools for a task via semantic keyword matching.",
+                "inputSchema": {"type":"object","properties":{"task":{"type":"string"}}, "required":["task"]}
+            },
+            {
+                "name": "memory_consolidate",
+                "description": "Summarize recent memories of a category into semantic_memory.",
+                "inputSchema": {"type":"object","properties":{"category":{"type":"string","default":"general"},"limit":{"type":"integer","default":50}}, "required":[]}
+            },
+            {
+                "name": "memory_retrieve_semantic",
+                "description": "Retrieve top semantic memories matching a query.",
+                "inputSchema": {"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer","default":5}}, "required":["query"]}
+            },
 
             {"name": "import_graph", "description": "Build a simple Python import graph and report top nodes.", "inputSchema": {"type":"object","properties":{"directory":{"type":"string","default":"."},"limit":{"type":"integer","default":10}}}},
             {"name": "file_scaffold", "description": "Create a new module or test skeleton.", "inputSchema": {"type":"object","properties":{"path":{"type":"string"},"kind":{"type":"string","enum":["module","test"]},"description":{"type":"string"},"dry_run":{"type":"boolean","default":True}}, "required":["path","kind"]}}
@@ -954,6 +979,13 @@ def handle_tool_call(message):
 
             # Web research
             "web_search": (handle_web_search, True),
+
+            # Collaboration/Reflection/Memory tools
+            "agent_collaborate": (handle_agent_collaborate, True),
+            "reflect": (handle_reflect, True),
+            "tool_match": (handle_tool_match, True),
+            "memory_consolidate": (handle_memory_consolidate, True),
+            "memory_retrieve_semantic": (handle_memory_retrieve_semantic, True),
 
             # Diagnostics & analysis
             "backend_diagnostics": (handle_backend_diagnostics, True),
@@ -1539,6 +1571,146 @@ def handle_workflow_explain(arguments, server):
         finally:
             loop.close()
     return text
+
+# --- Collaboration, Reflection, Tool Match, Memory (follow-up recs) ---
+
+def _run_llm(server, prompt: str, temperature: float = 0.2) -> str:
+    try:
+        return asyncio.get_event_loop().run_until_complete(
+            server.make_llm_request_with_retry(prompt, temperature=temperature)
+        )
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(server.make_llm_request_with_retry(prompt, temperature=temperature))
+        finally:
+            loop.close()
+    except Exception as e:
+        return f"LLM error: {e}"
+
+
+def handle_agent_collaborate(arguments, server):
+    task = (arguments.get("task") or "").strip()
+    if not task:
+        raise ValidationError("'task' is required")
+    roles = arguments.get("roles") or ["Researcher", "Developer", "Reviewer"]
+    rounds = int(arguments.get("rounds", 2))
+    history: list[dict] = []
+    for r in range(1, rounds + 1):
+        round_notes = []
+        for role in roles:
+            context = "\n\n".join([f"{h['role']}: {h['note']}" for h in history][-6:])
+            prompt = (
+                f"Role: {role}\nRound: {r}/{rounds}\nTask: {task}\n"
+                f"Recent context (may be partial):\n{context}\n\n"
+                "Contribute succinct bullet points (<=6) with concrete, technical steps and call out any risks or dependencies."
+            )
+            note = _run_llm(server, prompt)
+            note = _compact_text(note, 900)
+            history.append({"role": role, "round": r, "note": note})
+            round_notes.append({"role": role, "note": note})
+    # Synthesize
+    transcript = "\n\n".join([f"[{h['role']} r{h['round']}]\n{h['note']}" for h in history])
+    synth_prompt = (
+        "Synthesize the multi-agent discussion into a clear, actionable plan.\n"
+        "Respond in JSON with keys: goals (list), plan (list), risks (list), open_questions (list).\n\n"
+        f"Transcript:\n{_compact_text(transcript, 3500)}\n"
+    )
+    plan_txt = _run_llm(server, synth_prompt, temperature=0.1)
+    # Persist a compact artifact
+    ts = int(time.time())
+    server.storage.store_memory(
+        key=f"collab_{ts}",
+        value=json.dumps({"task": task, "roles": roles, "rounds": rounds, "synthesis": plan_txt[:1000]}),
+        category="collab_session",
+    )
+    return {"rounds": rounds, "roles": roles, "synthesis": plan_txt}
+
+
+def handle_reflect(arguments, server):
+    content = (arguments.get("content") or "").strip()
+    if not content:
+        raise ValidationError("'content' is required")
+    criteria = (arguments.get("criteria") or "Quality, correctness, clarity").strip()
+    rounds = int(arguments.get("rounds", 1))
+    current = content
+    last_critique = None
+    for i in range(rounds):
+        critique_prompt = (
+            f"Critique the following content against these criteria: {criteria}.\n"
+            "List concrete issues as bullets and suggest precise fixes.\n\nCONTENT:\n" + _compact_text(current, 2500)
+        )
+        last_critique = _run_llm(server, critique_prompt, temperature=0.2)
+        improve_prompt = (
+            f"Improve the content by applying the critique (keep original intent).\nCriteria: {criteria}.\n"
+            "Return only the improved content, no preface.\n\nCRITIQUE:\n" + _compact_text(last_critique, 1200) + "\n\nCONTENT:\n" + _compact_text(current, 2500)
+        )
+        current = _run_llm(server, improve_prompt, temperature=0.2)
+    return {"improved": current, "last_critique": last_critique}
+
+
+def handle_tool_match(arguments, server):
+    task = (arguments.get("task") or "").lower()
+    if not task:
+        raise ValidationError("'task' is required")
+    tools = get_all_tools()["tools"]
+    def score(t):
+        text = (t.get("name", "") + " " + t.get("description", "")).lower()
+        # simple token overlap
+        st = set(re.findall(r"[a-z0-9_]+", text))
+        sq = set(re.findall(r"[a-z0-9_]+", task))
+        return len(st & sq)
+    ranked = sorted(tools, key=score, reverse=True)
+    top = [{"name": t["name"], "description": t.get("description", "")} for t in ranked[:5]]
+    return {"matches": top}
+
+
+def handle_memory_consolidate(arguments, server):
+    category = (arguments.get("category") or "general").strip()
+    limit = int(arguments.get("limit", 50))
+    rows = server.storage.retrieve_memory(category=category, limit=limit) or []
+    texts = []
+    for r in rows:
+        v = r.get("value")
+        if isinstance(v, str):
+            texts.append(v)
+        else:
+            try:
+                texts.append(json.dumps(v, ensure_ascii=False))
+            except Exception:
+                continue
+    blob = _compact_text("\n\n".join(texts), 3500)
+    prompt = (
+        f"Summarize key facts and insights from {len(texts)} short notes into a compact knowledge memo.\n"
+        "Structure as bullets by theme, include actionable takeaways. Keep under 300 words.\n\n" + blob
+    )
+    summary = _run_llm(server, prompt, temperature=0.2)
+    key = f"semantic_summary_{category}_{int(time.time())}"
+    server.storage.store_memory(key=key, value=json.dumps({"summary": summary, "source_count": len(texts)}), category="semantic_memory")
+    return {"key": key, "summary": summary}
+
+
+def handle_memory_retrieve_semantic(arguments, server):
+    query = (arguments.get("query") or "").lower()
+    if not query:
+        raise ValidationError("'query' is required")
+    limit = int(arguments.get("limit", 5))
+    rows = server.storage.retrieve_memory(category="semantic_memory", limit=200) or []
+    items = []
+    for r in rows:
+        try:
+            d = json.loads(r.get("value", "{}"))
+            txt = (d.get("summary") or "").lower()
+            tokens_q = set(re.findall(r"[a-z0-9_]+", query))
+            tokens_t = set(re.findall(r"[a-z0-9_]+", txt))
+            score = len(tokens_q & tokens_t)
+            items.append({"key": r.get("key"), "summary": d.get("summary"), "score": score})
+        except Exception:
+            continue
+    items.sort(key=lambda x: x["score"], reverse=True)
+    return {"results": items[:limit]}
+
 
 
 def handle_workflow_execute(arguments, server):
