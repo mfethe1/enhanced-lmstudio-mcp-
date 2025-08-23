@@ -22,7 +22,8 @@ from audit_logger import ImmutableAuditLogger, AuditLevel, ActionType, Complianc
 from workflow_composer import WorkflowComposer
 
 # Import enhanced storage facade (selects SQLite/Postgres per env)
-from enhanced_mcp_storage import EnhancedMCPStorage
+from enhanced_mcp_storage import EnhancedMCPStorage as _LegacyEnhanced
+from enhanced_mcp_storage_v2 import StorageSelector
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -280,8 +281,8 @@ class EnhancedLMStudioMCPServer:
         self.model_name = os.getenv("MODEL_NAME", "openai/gpt-oss-20b")
         self.working_directory = os.getcwd()
 
-        # Initialize persistent storage via facade (SQLite by default, Postgres if configured)
-        self.storage = EnhancedMCPStorage()
+        # Initialize persistent storage: legacy facade wrapped by V2 selector when enabled
+        self.storage = StorageSelector(_LegacyEnhanced())
         # Performance monitoring settings
         self.performance_threshold = float(os.getenv("PERFORMANCE_THRESHOLD", "0.2"))  # seconds
 
