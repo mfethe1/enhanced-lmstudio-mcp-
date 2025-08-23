@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "lm": {
+      "command": "python",
+      "args": [
+        "C:\\Users\\mfeth\\.mcp-servers\\lmstudio-mcp\\server.py"
+      ],
+      "env": {
+        "LM_STUDIO_URL": "http://localhost:1234",
+        "MODEL_NAME": "openai/gpt-oss-20b"
+      }
+    }
+  }
+}

@@ -15,8 +15,14 @@ import ast
 import re
 from uuid import uuid4
 
-# Import our new storage layer
-from storage import MCPStorage
+# Enhanced modular components
+from enhanced_agent_teams import decide_backend_for_role as _enh_decide_backend_for_role  # delegate to enhanced module
+from enhanced_mcp_tools import merged_tools as _merged_tools
+from audit_logger import ImmutableAuditLogger, AuditLevel, ActionType, ComplianceRule, AttorneyStyleReviewer
+from workflow_composer import WorkflowComposer
+
+# Import enhanced storage facade (selects SQLite/Postgres per env)
+from enhanced_mcp_storage import EnhancedMCPStorage
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -25,10 +31,23 @@ logger = logging.getLogger(__name__)
 _server_singleton: Optional["EnhancedLMStudioMCPServer"] = None
 
 
+# Globals for audit/workflow subsystems
+_audit_logger: Optional[ImmutableAuditLogger] = None
+_workflow: Optional[WorkflowComposer] = None
+
 def get_server_singleton():
-    global _server_singleton
+    global _server_singleton, _audit_logger, _workflow
     if _server_singleton is None:
         _server_singleton = EnhancedLMStudioMCPServer()
+        # Initialize audit logger and workflow composer lazily with the server's storage
+        try:
+            _audit_logger = ImmutableAuditLogger(_server_singleton.storage)
+        except Exception:
+            _audit_logger = None
+        try:
+            _workflow = WorkflowComposer(_server_singleton, _server_singleton.storage)
+        except Exception:
+            _workflow = None
     return _server_singleton
 
 
@@ -145,6 +164,30 @@ def _extract_code_from_text(text: str) -> str:
             keep.append(ln)
     return "\n".join(keep).strip()
 
+# --- Secrets loader (local .secrets/.env.local) ---
+_DEF_SECRETS_PATH = Path('.secrets/.env.local')
+
+def _load_local_secrets():
+    try:
+        if _DEF_SECRETS_PATH.exists():
+            logger.info(f"Loading local secrets from {_DEF_SECRETS_PATH}")
+            for line in _DEF_SECRETS_PATH.read_text(encoding='utf-8').splitlines():
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                if '=' not in line:
+                    continue
+                k, v = line.split('=', 1)
+                k = k.strip()
+                v = v.strip()
+                # Do not overwrite existing env
+                if k and (k not in os.environ or not os.environ[k]):
+                    os.environ[k] = v
+    except Exception as e:
+        logger.warning(f"Failed to load local secrets: {e}")
+
+_load_local_secrets()
+
 def _build_sequential_thinking_prompt(
     session_id: str,
     server,
@@ -203,6 +246,9 @@ class ValidationError(Exception):
 # Allowed base directory for all filesystem operations
 _BASE_DIR = Path(os.getenv("ALLOWED_BASE_DIR", os.getcwd())).resolve()
 
+# Firecrawl configuration: do not embed secrets; require FIRECRAWL_API_KEY via environment
+FIRECRAWL_BASE_URL_STATIC = "https://api.firecrawl.dev"
+
 
 def _safe_path(p: str) -> Path:
     """Return a resolved path if and only if it is inside the allowed base dir."""
@@ -234,24 +280,14 @@ class EnhancedLMStudioMCPServer:
         self.model_name = os.getenv("MODEL_NAME", "openai/gpt-oss-20b")
         self.working_directory = os.getcwd()
 
-        # Initialize persistent storage (supports STORAGE_BACKEND=sqlite|postgres)
-        backend = os.getenv("STORAGE_BACKEND", "sqlite").strip().lower()
-        if backend == "postgres":
-            try:
-                from storage_postgres import MCPStoragePostgres
-                dsn = os.getenv("POSTGRES_DSN", "")
-                self.storage = MCPStoragePostgres(dsn=dsn)
-            except Exception as e:
-                logger.warning(f"Postgres storage unavailable ({e}); falling back to SQLite")
-                self.storage = MCPStorage()
-        else:
-            self.storage = MCPStorage()
+        # Initialize persistent storage via facade (SQLite by default, Postgres if configured)
+        self.storage = EnhancedMCPStorage()
         # Performance monitoring settings
         self.performance_threshold = float(os.getenv("PERFORMANCE_THRESHOLD", "0.2"))  # seconds
 
 
         # Performance monitoring settings
-    async def make_llm_request_with_retry(self, prompt: str, temperature: float = 0.1, retries: int = 2, backoff: float = 0.5) -> str:
+    async def make_llm_request_with_retry(self, prompt: str, temperature: float = 0.35, retries: int = 2, backoff: float = 0.5) -> str:
         """Centralized LLM request with simple retry/backoff (P1)"""
         import requests
         attempt = 0
@@ -326,7 +362,7 @@ class EnhancedLMStudioMCPServer:
             return wrapper
         return decorator
 
-    async def make_llm_request(self, prompt: str, temperature: float = 0.1) -> str:
+    async def make_llm_request(self, prompt: str, temperature: float = 0.35) -> str:
         """Make request to LM Studio with enhanced error handling"""
         try:
             import requests
@@ -405,81 +441,9 @@ def handle_message(message):
 
 def get_all_tools():
     """Return all available tools with enhanced capabilities"""
-    return {
+    base = {
         "tools": [
-            # Sequential Thinking & Problem Solving Tools
-            {
-                "name": "sequential_thinking",
-                "description": "A detailed tool for dynamic and reflective problem-solving through thoughts. This tool helps analyze problems through a flexible thinking process that can adapt and evolve.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "thought": {
-                            "type": "string",
-                            "description": "Your current thinking step"
-                        },
-                        "next_thought_needed": {
-                            "type": "boolean",
-                            "description": "Whether another thought step is needed"
-                        },
-                        "thought_number": {
-                            "type": "integer",
-                            "description": "Current thought number",
-                            "minimum": 1
-                        },
-                        "total_thoughts": {
-                            "type": "integer",
-                            "description": "Estimated total thoughts needed",
-                            "minimum": 1
-                        },
-                        "is_revision": {
-                            "type": "boolean",
-                            "description": "Whether this revises previous thinking"
-                        },
-                        "revises_thought": {
-                            "type": "integer",
-                            "description": "Which thought is being reconsidered",
-                            "minimum": 1
-                        },
-                        "branch_from_thought": {
-                            "type": "integer",
-                            "description": "Branching point thought number",
-                            "minimum": 1
-                        },
-                        "branch_id": {
-                            "type": "string",
-                            "description": "Branch identifier"
-                        },
-                        "needs_more_thoughts": {
-                            "type": "boolean",
-                            "description": "If more thoughts are needed"
-                        }
-                    },
-                    "required": ["thought", "next_thought_needed", "thought_number", "total_thoughts"]
-                }
-            },
-            {
-                "name": "get_thinking_session",
-                "description": "Retrieve all stored thoughts for a sequential thinking session",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "session_id": {"type": "string", "description": "Session identifier"}
-                    },
-                    "required": ["session_id"]
-                }
-            },
-            {
-                "name": "summarize_thinking_session",
-                "description": "Summarize a sequential thinking session",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "session_id": {"type": "string", "description": "Session identifier"}
-                    },
-                    "required": ["session_id"]
-                }
-            },
+            # Research & Planning
             {
                 "name": "deep_research",
                 "description": "Hybrid deep research: Firecrawl for sources, CrewAI agents for analysis and synthesis.",
@@ -505,354 +469,134 @@ def get_all_tools():
                 }
             },
 
-            # System Tools
+            # Agentic Teams
             {
-                "name": "health_check",
-                "description": "Check server health and connectivity",
+                "name": "agent_team_plan_and_code",
+                "description": "Planner, Coder, Reviewer propose a plan and code changes (returns patches and tests; optional apply).",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {}
+                    "properties": {
+                        "task": {"type": "string", "description": "What to build or change"},
+                        "target_files": {"type": "array", "items": {"type": "string"}, "description": "Files to read for context (optional)"},
+                        "constraints": {"type": "string", "description": "Constraints/acceptance criteria (optional)"},
+                        "apply_changes": {"type": "boolean", "description": "If true, write proposed contents to disk", "default": False},
+                        "auto_research_rounds": {"type": "integer", "description": "If >0, run a short refine pass after research", "default": 0}
+                    },
+                    "required": ["task"]
                 }
             },
             {
-                "name": "get_version",
-                "description": "Get server version and system information",
+                "name": "agent_team_review_and_test",
+                "description": "Reviewer and Test Author analyze changes, propose tests, and outline a test plan.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {}
+                    "properties": {
+                        "diff": {"type": "string", "description": "Proposed diff or code snippet to review"},
+                        "context": {"type": "string", "description": "Additional context (optional)"}
+                    },
+                    "required": ["diff"]
+                }
+            },
+            {
+                "name": "agent_team_refactor",
+                "description": "Refactorer and QA agents suggest modular refactors with docstrings and tests.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "module_path": {"type": "string", "description": "Module to refactor"},
+                        "goals": {"type": "string", "description": "Refactor goals (readability, modularity, TDD)"}
+                    },
+                    "required": ["module_path", "goals"]
                 }
             },
 
-            # Enhanced Code Analysis Tools
+            # Code Understanding & Improvement
+            {"name": "analyze_code", "description": "Analyze code for bugs/improvements/explanations", "inputSchema": {"type":"object","properties":{"code":{"type":"string"},"analysis_type":{"type":"string","enum":["bugs","optimization","explanation","refactor"]}}, "required":["code","analysis_type"]}},
+            {"name": "suggest_improvements", "description": "Suggestions to improve code", "inputSchema": {"type":"object","properties":{"code":{"type":"string"}} , "required":["code"]}},
+            {"name": "generate_tests", "description": "Generate unit tests for code", "inputSchema": {"type":"object","properties":{"code":{"type":"string"},"framework":{"type":"string","default":"pytest"}}, "required":["code"]}},
+
+            # Execution & Testing
+            {"name": "execute_code", "description": "Execute code in a temp sandbox", "inputSchema": {"type":"object","properties":{"code":{"type":"string"},"language":{"type":"string","enum":["python","javascript","bash"],"default":"python"},"timeout":{"type":"integer","default":30}}, "required":["code"]}},
+            {"name": "run_tests", "description": "Run project tests", "inputSchema": {"type":"object","properties":{"test_command":{"type":"string"},"test_file":{"type":"string"}}, "required":["test_command"]}},
+
+            # Memory
+            {"name": "store_memory", "description": "Store info in persistent memory", "inputSchema": {"type":"object","properties":{"key":{"type":"string"},"value":{"type":"string"},"category":{"type":"string","default":"general"}}, "required":["key","value"]}},
+            {"name": "retrieve_memory", "description": "Retrieve info from persistent memory", "inputSchema": {"type":"object","properties":{"key":{"type":"string"},"category":{"type":"string"},"search_term":{"type":"string"}}}},
+
+            # System
+            {"name": "health_check", "description": "Check server health and connectivity", "inputSchema": {"type":"object","properties":{}}},
+            {"name": "get_version", "description": "Get server version and system information", "inputSchema": {"type":"object","properties":{}}},
+
+            # Research helper
+            {"name": "propose_research", "description": "Propose research queries (and reasons) for a given problem/context.", "inputSchema": {"type":"object","properties":{"problem":{"type":"string"},"context":{"type":"string"},"max_queries":{"type":"integer","default":3}}, "required":["problem"]}}
+,
+
+            # Web research (shallow)
+            {"name": "web_search", "description": "Quick research using Firecrawl-backed deep_research (shallow).", "inputSchema": {"type":"object","properties":{"query":{"type":"string"},"time_limit":{"type":"integer","default":60},"max_depth":{"type":"integer","default":1}}, "required":["query"]}},
+
+            # Diagnostics & analysis
+            {"name": "backend_diagnostics", "description": "Report available LLM backends and per-role routing for a sample task.", "inputSchema": {"type":"object","properties":{"roles":{"type":"array","items":{"type":"string"}},"task_desc":{"type":"string"}}}},
+            {"name": "code_hotspots", "description": "Analyze repository for hotspots (LOC, functions, TODOs, branches).", "inputSchema": {"type":"object","properties":{"directory":{"type":"string","default":"."},"limit":{"type":"integer","default":10}}}},
+            # Audit and Workflow (Rec 6 & 7)
             {
-                "name": "analyze_code",
-                "description": "Analyze code using olympiccoder-32b model for bugs, improvements, and explanations",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "code": {
-                            "type": "string",
-                            "description": "The code to analyze"
-                        },
-                        "analysis_type": {
-                            "type": "string",
-                            "description": "Type of analysis (bugs, optimization, explanation, refactor)",
-                            "enum": ["bugs", "optimization", "explanation", "refactor"]
-                        }
-                    },
-                    "required": ["code", "analysis_type"]
-                }
+                "name": "audit_search",
+                "description": "Search immutable audit trail with simple filters",
+                "inputSchema": {"type": "object", "properties": {"action_type": {"type": "string"}, "level": {"type": "string"}, "tool_name": {"type": "string"}}, "required": []}
+            },
+            {
+                "name": "audit_verify_integrity",
+                "description": "Verify the audit chain integrity",
+                "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "default": 200}}, "required": []}
+            },
+            {
+                "name": "audit_add_rule",
+                "description": "Add a compliance rule (simple substring pattern)",
+                "inputSchema": {"type": "object", "properties": {"rule_id": {"type": "string"}, "name": {"type": "string"}, "pattern": {"type": "string"}, "severity": {"type": "string", "default": "info"}, "action_required": {"type": "string", "default": "log"}, "retention_years": {"type": "integer", "default": 7}}, "required": ["rule_id","name","pattern"]}
+            },
+            {
+                "name": "audit_compliance_report",
+                "description": "Generate a basic compliance report",
+                "inputSchema": {"type": "object", "properties": {"tenant_id": {"type": "string"}}, "required": []}
+            },
+            {
+                "name": "audit_review_action",
+                "description": "Attorney-style compliance review of an action",
+                "inputSchema": {"type": "object", "properties": {"action_desc": {"type": "string"}, "context": {"type": "object"}, "domain": {"type": "string", "default": "general"}}, "required": ["action_desc"]}
+            },
+            {
+                "name": "workflow_create",
+                "description": "Create a new workflow",
+                "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}, "description": {"type": "string"}}, "required": ["name"]}
+            },
+            {
+                "name": "workflow_add_node",
+                "description": "Add a node to a workflow",
+                "inputSchema": {"type": "object", "properties": {"workflow_id": {"type": "string"}, "node_type": {"type": "string"}, "name": {"type": "string"}, "config": {"type": "object"}}, "required": ["workflow_id","node_type","name"]}
+            },
+            {
+                "name": "workflow_connect_nodes",
+                "description": "Connect two nodes in a workflow",
+                "inputSchema": {"type": "object", "properties": {"workflow_id": {"type": "string"}, "source_node_id": {"type": "string"}, "target_node_id": {"type": "string"}}, "required": ["workflow_id","source_node_id","target_node_id"]}
+            },
+            {
+                "name": "workflow_explain",
+                "description": "Explain a workflow using LLM",
+                "inputSchema": {"type": "object", "properties": {"workflow_id": {"type": "string"}}, "required": ["workflow_id"]}
+            },
+            {
+                "name": "workflow_execute",
+                "description": "Execute a workflow (mock execution)",
+                "inputSchema": {"type": "object", "properties": {"workflow_id": {"type": "string"}, "inputs": {"type": "object"}}, "required": ["workflow_id"]}
             },
 
-            {
-                "name": "explain_code",
-                "description": "Get detailed explanation of how code works using olympiccoder-32b",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "code": {
-                            "type": "string",
-                            "description": "The code to explain"
-                        }
-                    },
-                    "required": ["code"]
-                }
-            },
-            {
-                "name": "suggest_improvements",
-                "description": "Get suggestions for code improvements using olympiccoder-32b",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "code": {
-                            "type": "string",
-                            "description": "The code to improve"
-                        }
-                    },
-                    "required": ["code"]
-                }
-            },
-            {
-                "name": "generate_tests",
-                "description": "Generate unit tests for given code using olympiccoder-32b",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "code": {
-                            "type": "string",
-                            "description": "The code to generate tests for"
-                        },
-                        "framework": {
-                            "type": "string",
-                            "description": "Testing framework to use (pytest, unittest, jest, etc.)",
-                            "default": "pytest"
-                        }
-                    },
-                    "required": ["code"]
-                }
-            },
-
-            # Code Execution & Testing Tools
-            {
-                "name": "execute_code",
-                "description": "Execute code safely in a temporary environment and return results",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "code": {
-                            "type": "string",
-                            "description": "The code to execute"
-                        },
-                        "language": {
-                            "type": "string",
-                            "description": "Programming language (python, javascript, bash)",
-                            "enum": ["python", "javascript", "bash"],
-                            "default": "python"
-                        },
-                        "timeout": {
-                            "type": "integer",
-                            "description": "Execution timeout in seconds",
-                            "default": 30
-                        }
-                    },
-                    "required": ["code"]
-                }
-            },
-            {
-                "name": "run_tests",
-                "description": "Run tests in the current project and return results",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "test_command": {
-                            "type": "string",
-                            "description": "Test command to run (e.g., 'pytest', 'npm test')"
-                        },
-                        "test_file": {
-                            "type": "string",
-                            "description": "Specific test file to run (optional)"
-                        }
-                    },
-                    "required": ["test_command"]
-                }
-            },
-
-            # File System & Project Management Tools
-            {
-                "name": "read_file_content",
-                "description": "Read content from a file in the project",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "file_path": {
-                            "type": "string",
-                            "description": "Path to the file to read"
-                        },
-                        "start_line": {
-                            "type": "integer",
-                            "description": "Starting line number (optional)"
-                        },
-                        "end_line": {
-                            "type": "integer",
-                            "description": "Ending line number (optional)"
-                        }
-                    },
-                    "required": ["file_path"]
-                }
-            },
-            {
-                "name": "write_file_content",
-                "description": "Write content to a file in the project",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "file_path": {
-                            "type": "string",
-                            "description": "Path to the file to write"
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "Content to write to the file"
-                        },
-                        "mode": {
-                            "type": "string",
-                            "description": "Write mode (overwrite, append)",
-                            "enum": ["overwrite", "append"],
-                            "default": "overwrite"
-                        }
-                    },
-                    "required": ["file_path", "content"]
-                }
-            },
-            {
-                "name": "list_directory",
-                "description": "List files and directories in a path",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "directory_path": {
-                            "type": "string",
-                            "description": "Path to the directory to list",
-                            "default": "."
-                        },
-                        "include_hidden": {
-                            "type": "boolean",
-                            "description": "Include hidden files",
-                            "default": False
-                        }
-                    }
-                }
-            },
-            {
-                "name": "search_files",
-                "description": "Search for text patterns in files",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "pattern": {
-                            "type": "string",
-                            "description": "Search pattern (regex supported)"
-                        },
-                        "file_pattern": {
-                            "type": "string",
-                            "description": "File pattern to search in (e.g., '*.py')",
-                            "default": "*"
-                        },
-                        "directory": {
-                            "type": "string",
-                            "description": "Directory to search in",
-                            "default": "."
-                        }
-                    },
-                    "required": ["pattern"]
-                }
-            },
-
-            # Memory & Context Management Tools (Enhanced)
-            {
-                "name": "store_memory",
-                "description": "Store information in persistent memory for later retrieval",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "key": {
-                            "type": "string",
-                            "description": "Memory key identifier"
-                        },
-                        "value": {
-                            "type": "string",
-                            "description": "Information to store"
-                        },
-                        "category": {
-                            "type": "string",
-                            "description": "Memory category (e.g., 'error', 'solution', 'pattern')",
-                            "default": "general"
-                        }
-                    },
-                    "required": ["key", "value"]
-                }
-            },
-            {
-                "name": "retrieve_memory",
-                "description": "Retrieve information from persistent memory",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "key": {
-                            "type": "string",
-                            "description": "Memory key to retrieve (optional)"
-                        },
-                        "category": {
-                            "type": "string",
-                            "description": "Memory category to search (optional)"
-                        },
-                        "search_term": {
-                            "type": "string",
-                            "description": "Search term to find related memories (optional)"
-                        }
-                    }
-                }
-            },
-
-            # Performance Monitoring Tools (New)
-            {
-                "name": "get_performance_stats",
-                "description": "Get performance statistics for tool usage and system health",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "tool_name": {
-                            "type": "string",
-                            "description": "Specific tool to get stats for (optional)"
-                        },
-                        "hours": {
-                            "type": "integer",
-                            "description": "Time period in hours (default: 24)",
-                            "default": 24
-                        }
-                    }
-                }
-            },
-            {
-                "name": "get_error_patterns",
-                "description": "Get error patterns and trends for debugging and improvement",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "hours": {
-                            "type": "integer",
-                            "description": "Time period in hours (default: 24)",
-                            "default": 24
-                        }
-                    }
-                }
-            },
-
-            # Advanced Debugging Tools
-            {
-                "name": "debug_analyze",
-                "description": "Analyze code for potential debugging issues and provide detailed analysis",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "code": {
-                            "type": "string",
-                            "description": "Code to debug"
-                        },
-                        "error_message": {
-                            "type": "string",
-                            "description": "Error message if available"
-                        },
-                        "context": {
-                            "type": "string",
-                            "description": "Additional context about the issue"
-                        }
-                    }
-                }
-            },
-            {
-                "name": "trace_execution",
-                "description": "Trace code execution step by step for debugging",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "code": {
-                            "type": "string",
-                            "description": "Code to trace"
-                        },
-                        "inputs": {
-                            "type": "string",
-                            "description": "Input values for testing"
-                        }
-                    },
-                    "required": ["code"]
-                }
-            }
+            {"name": "import_graph", "description": "Build a simple Python import graph and report top nodes.", "inputSchema": {"type":"object","properties":{"directory":{"type":"string","default":"."},"limit":{"type":"integer","default":10}}}},
+            {"name": "file_scaffold", "description": "Create a new module or test skeleton.", "inputSchema": {"type":"object","properties":{"path":{"type":"string"},"kind":{"type":"string","enum":["module","test"]},"description":{"type":"string"},"dry_run":{"type":"boolean","default":True}}, "required":["path","kind"]}}
         ]
     }
+    # Allow enhanced module to merge/augment tools while preserving shape
+    return _merged_tools(base)
 
 
-            # System Tools
 def _sanitize_url(url: str) -> str:
     try:
         # Basic URL sanitation: strip whitespace and guard against data: or javascript:
@@ -862,6 +606,112 @@ def _sanitize_url(url: str) -> str:
         return u
     except Exception:
         return ""
+
+# --- New Tools: web_search, backend_diagnostics, code_hotspots, import_graph, file_scaffold ---
+
+def handle_web_search(arguments, server):
+    query = (arguments.get("query") or "").strip()
+    if not query:
+        raise ValidationError("'query' is required")
+    time_limit = int(arguments.get("time_limit", 60))
+    max_depth = int(arguments.get("max_depth", 1))
+    return handle_deep_research({"query": query, "time_limit": time_limit, "max_depth": max_depth}, server)
+
+
+def handle_backend_diagnostics(arguments, server):
+    roles = arguments.get("roles") or [
+        "Planner", "Coder", "Reviewer", "Security Reviewer", "Performance Analyzer",
+    ]
+    task_desc = (arguments.get("task_desc") or "diagnostics").strip()
+
+    # Backend presence
+    available = {
+        "anthropic": bool(os.getenv("ANTHROPIC_API_KEY")),
+        "openai": bool(os.getenv("OPENAI_API_KEY")),
+        "lmstudio": bool(os.getenv("LMSTUDIO_API_BASE") or os.getenv("OPENAI_API_BASE")),
+    }
+    lines = ["Backends available:"] + [f"- {k}: {v}" for k, v in available.items()]
+
+    # Per-role routing
+    lines.append("\nRouting decisions:")
+    for r in roles:
+        b = _decide_backend_for_role(r, task_desc)
+        llm = _build_llm_for_backend(b)
+        model = getattr(llm, "model", "n/a") if llm else "n/a"
+        lines.append(f"- {r}: {b} ({model})")
+    return "\n".join(lines)
+
+
+def _walk_py_files(root: Path):
+    for p in root.rglob("*.py"):
+        if any(part in {".git", "venv", ".venv", "node_modules", "dist", "build"} for part in p.parts):
+            continue
+        yield p
+
+
+def handle_code_hotspots(arguments, server):
+    root = Path(arguments.get("directory") or ".").resolve()
+    limit = int(arguments.get("limit", 10))
+    stats = []
+    for p in _walk_py_files(root):
+        try:
+            txt = p.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        loc = txt.count("\n") + 1
+        todos = len(re.findall(r"#\s*TODO", txt, flags=re.IGNORECASE))
+        funcs = len(re.findall(r"^def\s+\w+\(", txt, flags=re.IGNORECASE | re.MULTILINE))
+        branches = txt.count(" if ") + txt.count(" elif ") + txt.count(" else:")
+        stats.append((loc, todos, funcs, branches, str(p.relative_to(root))))
+    stats.sort(reverse=True)
+    header = "loc,todos,funcs,branches,path"
+    rows = [header] + [f"{a},{b},{c},{d},{e}" for a,b,c,d,e in stats[:limit]]
+    return "\n".join(rows)
+
+
+def handle_import_graph(arguments, server):
+    root = Path(arguments.get("directory") or ".").resolve()
+    limit = int(arguments.get("limit", 10))
+    edges = {}
+    for p in _walk_py_files(root):
+        try:
+            txt = p.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        mod = str(p.relative_to(root)).replace(os.sep, ".").rstrip(".py").rstrip(".")
+        for m in re.findall(r"^from\s+([\w\.]+)\s+import\s+", txt, flags=re.MULTILINE):
+            edges.setdefault(m, set()).add(mod)
+        for m in re.findall(r"^import\s+([\w\.]+)", txt, flags=re.MULTILINE):
+            edges.setdefault(m, set()).add(mod)
+    # Rank by in-degree
+    ranked = sorted(((k, len(v)) for k,v in edges.items()), key=lambda x: x[1], reverse=True)[:limit]
+    header = "module,in_degree"
+    rows = [header] + [f"{m},{d}" for m,d in ranked]
+    return "\n".join(rows)
+
+
+def handle_file_scaffold(arguments, server):
+    path = (arguments.get("path") or "").strip()
+    kind = (arguments.get("kind") or "").strip()
+    desc = (arguments.get("description") or "").strip()
+    dry = bool(arguments.get("dry_run", True))
+    if not path or kind not in {"module", "test"}:
+        raise ValidationError("path and kind ('module'|'test') are required")
+    sp = _safe_path(path)
+    template = """# {desc}
+""" if kind == "module" else """import pytest
+
+
+def test_placeholder():
+    assert True
+"""
+    out = f"Would write {sp} ({len(template)} chars)"
+    if dry:
+        return out
+    sp.parent.mkdir(parents=True, exist_ok=True)
+    sp.write_text(template, encoding="utf-8")
+    return out.replace("Would ", "")
+
 
 
 def handle_deep_research(arguments, server):
@@ -878,53 +728,123 @@ def handle_deep_research(arguments, server):
     artifacts = {"query": query, "stage1": {}, "stage2": {}}
 
     # Stage 1: Firecrawl Deep Research
+    # Prefer Firecrawl MCP proxy if available (Augment environment), otherwise call Firecrawl HTTP API directly
     try:
         from functions import firecrawl_deep_research_firecrawl_mcp as firecrawl_deep
     except Exception:
         firecrawl_deep = None
+
     try:
         if firecrawl_deep is not None:
+            # Use MCP tool proxy (provided by the hosting environment)
             fc = firecrawl_deep({
                 "query": query,
                 "maxDepth": max(1, min(max_depth, 10)),
                 "timeLimit": max(30, min(time_limit, 300)),
                 "maxUrls": 40,
             })
-            # Normalize Firecrawl output
             stage1 = {
                 "final": (fc.get("data", {}) or {}).get("finalAnalysis") if isinstance(fc, dict) else None,
                 "raw": fc,
             }
         else:
-            stage1 = {"final": None, "raw": None, "warning": "Firecrawl MCP not available"}
+            # Fallback: direct Firecrawl API call via HTTP if API key is configured
+            api_key = (os.getenv("FIRECRAWL_API_KEY", "").strip())
+            base_url = (os.getenv("FIRECRAWL_BASE_URL", FIRECRAWL_BASE_URL_STATIC).rstrip("/"))
+            if not api_key:
+                stage1 = {
+                    "final": None,
+                    "raw": None,
+                    "warning": "Firecrawl MCP unavailable and FIRECRAWL_API_KEY not set; skipping stage 1. Set FIRECRAWL_API_KEY or enable MCP."
+                }
+            else:
+                import requests
+                payload = {
+                    "query": query,
+                    "maxDepth": max(1, min(max_depth, 10)),
+                    "timeLimit": max(30, min(time_limit, 300)),
+                    "maxUrls": 40,
+                }
+                headers = {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                }
+                # Try versioned endpoint first, then unversioned for backward compatibility
+                urls_to_try = [f"{base_url}/v1/deep-research", f"{base_url}/deep-research"]
+                resp = None
+                for url in urls_to_try:
+                    try:
+                        r = requests.post(url, json=payload, headers=headers, timeout=(15, 120))
+                        # Prefer first success; if 404, try next URL
+                        if r.status_code == 404:
+                            resp = r
+                            continue
+                        resp = r
+                        break
+                    except Exception as _:
+                        # Try next URL on transport errors
+                        continue
+                if resp is not None and 200 <= resp.status_code < 300:
+                    fc = resp.json()
+                    stage1 = {
+                        "final": (fc.get("data", {}) or {}).get("finalAnalysis") if isinstance(fc, dict) else None,
+                        "raw": fc,
+                    }
+                else:
+                    msg = f"no response" if resp is None else f"HTTP {resp.status_code}: {resp.text[:200]}"
+                    stage1 = {
+                        "final": None,
+                        "raw": None,
+                        "error": f"Firecrawl {msg}"
+                    }
     except Exception as e:
         stage1 = {"final": None, "error": f"Firecrawl error: {str(e)}"}
+
     artifacts["stage1"] = stage1
 
     # Stage 2: CrewAI multi-agent synthesis (optional; best-effort)
     try:
         from crewai import Agent, Crew, Task
-        # Create agents with focused roles
+        # Try to hardwire CrewAI to LM Studio's OpenAI-compatible endpoint and model
+        llm = None
+        try:
+            try:
+                # CrewAI v0.50+ style
+                from crewai import LLM  # type: ignore
+            except Exception:
+                # Older style
+                from crewai.llm import LLM  # type: ignore
+            # Configure LLM to use LM Studio with the requested model
+            # Prefer LMSTUDIO_* variables if set; fall back to OPENAI_* for backward compat
+            lmstudio_base = os.getenv("LMSTUDIO_API_BASE") or os.getenv("OPENAI_API_BASE", "http://localhost:1234/v1")
+            lmstudio_key = os.getenv("LMSTUDIO_API_KEY") or os.getenv("OPENAI_API_KEY", "sk-noauth")
+            hardwired_model = os.getenv("LMSTUDIO_MODEL", "openai/gpt-oss-20b")
+            llm = LLM(model=hardwired_model, base_url=lmstudio_base, api_key=lmstudio_key, temperature=0.2)
+        except Exception:
+            llm = None  # If LLM config fails, proceed; fallback synthesis will cover errors
+
+        # Create agents with focused roles (inject llm if available)
+        agent_kwargs = {"allow_delegation": False, "verbose": False}
+        if llm is not None:
+            agent_kwargs["llm"] = llm
+
         analyst = Agent(
             role="Analyst",
             goal="Categorize and evaluate Firecrawl findings, extract key facts and gaps.",
             backstory="Senior research analyst skilled at distilling insights from diverse sources.",
-            allow_delegation=False,
-            verbose=False,
+            **agent_kwargs,
         )
         researcher = Agent(
             role="Researcher",
             goal="Identify missing angles and perform targeted follow-ups based on gaps.",
             backstory="Curious investigator who knows where to look for authoritative sources.",
-            allow_delegation=False,
-            verbose=False,
+            **agent_kwargs,
         )
         synthesizer = Agent(
             role="Synthesizer",
             goal="Produce concise, actionable recommendations tailored to the query.",
             backstory="Executive-level writer focusing on clarity and actionability.",
-            allow_delegation=False,
-            verbose=False,
+            **agent_kwargs,
         )
         # Prepare context from Stage 1
         fc_summary = stage1.get("final") or ""
@@ -940,7 +860,33 @@ def handle_deep_research(arguments, server):
         crew_out = crew.kickoff()
         stage2 = {"report": str(crew_out)[:4000]}
     except Exception as e:
-        stage2 = {"report": None, "error": f"CrewAI error: {str(e)}"}
+        # Fallback: synthesize using the local LLM if CrewAI isn't installed or fails
+        try:
+            fc_summary = stage1.get("final") or ""
+            fc_raw = stage1.get("raw")
+            fc_raw_text = _compact_text(json.dumps(fc_raw, ensure_ascii=False) if isinstance(fc_raw, (dict, list)) else str(fc_raw))
+            synthesis_prompt = (
+                "You are an expert research synthesizer. Based on the following findings, produce a concise, actionable summary with 3-6 bullets, then a short conclusion.\n\n"
+                f"Query: {query}\n\nFindings:\n{fc_summary or fc_raw_text}\n\n"
+                "Output only text."
+            )
+            # Use the centralized LLM helper with retry
+            try:
+                llm_out = asyncio.get_event_loop().run_until_complete(
+                    server.make_llm_request_with_retry(synthesis_prompt, temperature=0.2)
+                )
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                try:
+                    asyncio.set_event_loop(loop)
+                    llm_out = loop.run_until_complete(
+                        server.make_llm_request_with_retry(synthesis_prompt, temperature=0.2)
+                    )
+                finally:
+                    loop.close()
+            stage2 = {"report": _compact_text(llm_out)}
+        except Exception as e2:
+            stage2 = {"report": None, "error": f"CrewAI error: {str(e)}; fallback synthesis failed: {str(e2)}"}
 
     artifacts["stage2"] = stage2
 
@@ -957,7 +903,7 @@ def handle_deep_research(arguments, server):
     summary = (
         f"Deep research {research_id} completed.\n\n"
         f"Stage 1 (Firecrawl): {stage1_note[:300]}\n\n"
-        f"Stage 2 (CrewAI): {stage2_note[:600]}\n\n"
+        f"Stage 2 (Synthesis): {stage2_note[:600]}\n\n"
         "Use research_id to retrieve details later."
     )
     return summary
@@ -976,30 +922,67 @@ def handle_tool_call(message):
 
         # Dispatch table mapping tool names to (handler, needs_server)
         registry = {
-            "sequential_thinking": (handle_sequential_thinking, True),
+            # Core
+            "deep_research": (handle_deep_research, True),
+            "get_research_details": (handle_get_research_details, True),
+            "propose_research": (handle_propose_research, True),
+
+            # Agentic teams
+            "agent_team_plan_and_code": (handle_agent_team_plan_and_code, True),
+            "agent_team_review_and_test": (handle_agent_team_review_and_test, True),
+            "agent_team_refactor": (handle_agent_team_refactor, True),
+
+            # Code understanding
             "analyze_code": (lambda args, srv: handle_llm_analysis_tool("analyze_code", args, srv), True),
             "explain_code": (lambda args, srv: handle_llm_analysis_tool("explain_code", args, srv), True),
             "suggest_improvements": (lambda args, srv: handle_llm_analysis_tool("suggest_improvements", args, srv), True),
             "generate_tests": (lambda args, srv: handle_llm_analysis_tool("generate_tests", args, srv), True),
+
+            # Execution & Project
             "execute_code": (handle_code_execution, False),
             "run_tests": (handle_test_execution, False),
             "read_file_content": (handle_file_read, False),
             "write_file_content": (handle_file_write, False),
             "list_directory": (handle_directory_list, False),
             "search_files": (handle_file_search, False),
+
+            # Memory & System
             "store_memory": (handle_memory_store, True),
             "retrieve_memory": (handle_memory_retrieve, True),
-            "get_performance_stats": (handle_performance_stats, True),
-            "get_error_patterns": (handle_error_patterns, True),
             "health_check": (handle_health_check, True),
             "get_version": (handle_get_version, True),
-            "debug_analyze": (handle_debug_analysis, True),
-            "trace_execution": (handle_execution_trace, True),
+
+            # Web research
+            "web_search": (handle_web_search, True),
+
+            # Diagnostics & analysis
+            "backend_diagnostics": (handle_backend_diagnostics, True),
+            "code_hotspots": (handle_code_hotspots, True),
+            "import_graph": (handle_import_graph, True),
+            "file_scaffold": (handle_file_scaffold, True),
+
+            # Optional debugging and thinking tools (available but not advertised in minimal surface)
+            "sequential_thinking": (handle_sequential_thinking, True),
             "get_thinking_session": (handle_get_thinking_session, True),
             "summarize_thinking_session": (handle_summarize_thinking_session, True),
-            "deep_research": (handle_deep_research, True),
-            "get_research_details": (handle_get_research_details, True),
+            "get_performance_stats": (handle_performance_stats, True),
+            "get_error_patterns": (handle_error_patterns, True),
+            "debug_analyze": (handle_debug_analysis, True),
+            "trace_execution": (handle_execution_trace, True),
+            # Audit & Workflow tools
+            "audit_search": (handle_audit_search, True),
+            "audit_verify_integrity": (handle_audit_verify_integrity, True),
+            "audit_add_rule": (handle_audit_add_rule, True),
+            "audit_compliance_report": (handle_audit_compliance_report, True),
+            "audit_review_action": (handle_audit_review_action, True),
+            "workflow_create": (handle_workflow_create, True),
+            "workflow_add_node": (handle_workflow_add_node, True),
+            "workflow_connect_nodes": (handle_workflow_connect_nodes, True),
+            "workflow_explain": (handle_workflow_explain, True),
+            "workflow_execute": (handle_workflow_execute, True),
+
         }
+
 
         if tool_name not in registry:
             return {
@@ -1015,11 +998,36 @@ def handle_tool_call(message):
         else:
             result = monitored(handler)(arguments)
 
-            # Unreachable with registry, kept for safety
+        # After handler executes successfully, audit the tool call
+        try:
+            if _audit_logger is not None:
+                _audit_logger.log(
+                    action_type=ActionType.AGENT_DECISION,
+                    level=AuditLevel.INFO,
+                    user_id=None,
+                    tenant_id=None,
+                    details={"tool_name": tool_name, "success": True},
+                    context={"args": arguments, "ts": time.time()},
+                    compliance_tags=[tool_name, "tool_execution"],
+                )
+        except Exception:
             pass
 
         # Always return text content per MCP schema
         payload_text = _to_text_content(result)
+
+        # Best-effort: log a compact conversation envelope for traceability
+        try:
+            env_key = f"envelope_{tool_name}_{int(time.time())}"
+            env_val = json.dumps({
+                "tool": tool_name,
+                "args": arguments,
+                "result_preview": payload_text[:512],
+            }, ensure_ascii=False)
+            server.storage.store_memory(key=env_key, value=env_val, category="envelope")
+        except Exception:
+            pass
+
         return {
             "jsonrpc": "2.0",
             "id": message.get("id"),
@@ -1105,6 +1113,7 @@ def handle_sequential_thinking(arguments, server):
             # Compact the suggestion and store it as an auto-generated thought step
             compacted = _compact_text(llm_suggestion)
             try:
+
                 history = server.storage.get_thinking_session(session_id) or []
                 next_idx = max((s.get("thought_number", 0) for s in history), default=0) + 1
             except Exception:
@@ -1398,16 +1407,641 @@ def handle_file_search(arguments):
     file_pattern = arguments.get("file_pattern", "*")
     directory = arguments.get("directory", ".")
 
+    import glob
+    import re
+
+# --- Audit MCP Tool Handlers (Rec 6) ---
+
+def _require_audit():
+    if _audit_logger is None:
+        raise ValidationError("audit subsystem unavailable")
+    return _audit_logger
+
+
+def handle_audit_search(arguments, server):
+    audit = _require_audit()
+    filters = {k: arguments.get(k) for k in ("action_type", "level", "tool_name") if arguments.get(k)}
+    limit = int(arguments.get("limit", 100))
+    return audit.search(filters, limit=limit)
+
+
+def handle_audit_verify_integrity(arguments, server):
+    audit = _require_audit()
+    limit = int(arguments.get("limit", 200))
+    return audit.verify_chain(limit=limit)
+
+
+def handle_audit_add_rule(arguments, server):
+    audit = _require_audit()
+    rid = (arguments.get("rule_id") or "").strip()
+    name = (arguments.get("name") or "").strip()
+    pattern = (arguments.get("pattern") or "").strip()
+    if not rid or not name or not pattern:
+        raise ValidationError("rule_id, name, and pattern are required")
+    severity_str = (arguments.get("severity") or "info").lower()
+    # Normalize severity to AuditLevel
     try:
-        import glob
-        import re
+        sev = AuditLevel(severity_str)
+    except Exception:
+        sev = AuditLevel.INFO
+    action_required = (arguments.get("action_required") or "log").lower()
+    retention_years = int(arguments.get("retention_years", 7))
+    rule = ComplianceRule(
+        rule_id=rid,
+        name=name,
+        description=arguments.get("description", ""),
+        pattern=pattern,
+        severity=sev,
+        action_required=action_required,
+        retention_years=retention_years,
+    )
+    audit.add_rule(rule)
+    return {"ok": True}
 
-        rp = _safe_directory(directory)
-        results = []
-        search_regex = re.compile(pattern, re.IGNORECASE)
 
-        # Default ignore directories
-        ignore_dirs = {".git", "node_modules", "venv", ".venv", "dist", "build"}
+def handle_audit_compliance_report(arguments, server):
+    audit = _require_audit()
+    return audit.generate_compliance_report(tenant_id=arguments.get("tenant_id"))
+
+
+def handle_audit_review_action(arguments, server):
+    audit = _require_audit()
+    action_desc = (arguments.get("action_desc") or "").strip()
+    if not action_desc:
+        raise ValidationError("action_desc is required")
+    context = arguments.get("context") or {}
+    domain = (arguments.get("domain") or "general").strip()
+    reviewer = AttorneyStyleReviewer(audit, server)
+    try:
+        return asyncio.get_event_loop().run_until_complete(reviewer.review(action_desc, context, domain))
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(reviewer.review(action_desc, context, domain))
+        finally:
+            loop.close()
+
+
+# --- Workflow MCP Tool Handlers (Rec 7) ---
+
+def _require_workflow():
+    if _workflow is None:
+        raise ValidationError("workflow subsystem unavailable")
+    return _workflow
+
+
+def handle_workflow_create(arguments, server):
+    wf = _require_workflow()
+    name = (arguments.get("name") or "").strip()
+    if not name:
+        raise ValidationError("name is required")
+    description = (arguments.get("description") or "").strip()
+    wid = wf.create_workflow(name=name, description=description)
+    return {"workflow_id": wid}
+
+
+def handle_workflow_add_node(arguments, server):
+    wf = _require_workflow()
+    workflow_id = (arguments.get("workflow_id") or "").strip()
+    node_type = (arguments.get("node_type") or "").strip()
+    name = (arguments.get("name") or "").strip()
+    config = arguments.get("config") or {}
+    if not (workflow_id and node_type and name):
+        raise ValidationError("workflow_id, node_type, and name are required")
+    nid = wf.add_node(workflow_id, node_type, name, config)
+    return {"node_id": nid}
+
+
+def handle_workflow_connect_nodes(arguments, server):
+    wf = _require_workflow()
+    workflow_id = (arguments.get("workflow_id") or "").strip()
+    src = (arguments.get("source_node_id") or "").strip()
+    tgt = (arguments.get("target_node_id") or "").strip()
+    if not (workflow_id and src and tgt):
+        raise ValidationError("workflow_id, source_node_id, target_node_id are required")
+    ok = wf.connect_nodes(workflow_id, src, tgt)
+    return {"ok": bool(ok)}
+
+
+def handle_workflow_explain(arguments, server):
+    wf = _require_workflow()
+    workflow_id = (arguments.get("workflow_id") or "").strip()
+    if not workflow_id:
+        raise ValidationError("workflow_id is required")
+    try:
+        text = asyncio.get_event_loop().run_until_complete(wf.explain_workflow(workflow_id))
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            text = loop.run_until_complete(wf.explain_workflow(workflow_id))
+        finally:
+            loop.close()
+    return text
+
+
+def handle_workflow_execute(arguments, server):
+    wf = _require_workflow()
+    workflow_id = (arguments.get("workflow_id") or "").strip()
+    if not workflow_id:
+        raise ValidationError("workflow_id is required")
+    inputs = arguments.get("inputs") or {}
+    try:
+        out = asyncio.get_event_loop().run_until_complete(wf.execute_workflow(workflow_id, inputs))
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            out = loop.run_until_complete(wf.execute_workflow(workflow_id, inputs))
+        finally:
+            loop.close()
+    return out
+
+
+# --- Agentic Team Handlers ---
+
+
+def _extract_fenced_code_blocks(text: str) -> list[tuple[str, str]]:
+    blocks: list[tuple[str, str]] = []
+    fence = "```"
+    i = 0
+    while True:
+        start = text.find(fence, i)
+        if start == -1:
+            break
+        lang_end = text.find("\n", start + 3)
+        if lang_end == -1:
+            break
+        lang = text[start + 3:lang_end].strip().lower()  # may be 'python', 'diff', etc.
+        end = text.find(fence, lang_end + 1)
+        if end == -1:
+            break
+        content = text[lang_end + 1:end]
+        blocks.append((lang, content))
+        i = end + 3
+    return blocks
+
+
+def _apply_proposed_changes(proposal_text: str, dry_run: bool = False) -> list[str]:
+    """Apply proposed file changes from fenced code blocks.
+
+    Supported format:
+    ```python
+    # File: relative/path.ext
+    <file content>
+    ```
+    or
+    ```
+    # path: relative/path.ext
+    <file content>
+    ```
+
+    When dry_run=True, do not write files; return messages describing what would be written.
+    Unified diffs are not applied for safety.
+    """
+    applied: list[str] = []
+    blocks = _extract_fenced_code_blocks(proposal_text)
+    for lang, content in blocks:
+        # Parse first non-empty line for file path marker
+        lines = [ln for ln in content.splitlines()]
+        idx = 0
+        while idx < len(lines) and lines[idx].strip() == "":
+            idx += 1
+        if idx >= len(lines):
+            continue
+        header = lines[idx].strip()
+        path_val = None
+        if header.lower().startswith("# file:"):
+            path_val = header.split(":", 1)[1].strip()
+            idx += 1
+        elif header.lower().startswith("# path:"):
+            path_val = header.split(":", 1)[1].strip()
+            idx += 1
+        if not path_val:
+            continue
+        # Remaining content is file body
+        body = "\n".join(lines[idx:])
+        try:
+            sp = _safe_path(path_val)
+            if dry_run:
+                applied.append(f"Would write {path_val} ({len(body)} chars)")
+            else:
+                sp.parent.mkdir(parents=True, exist_ok=True)
+                with open(sp, "w", encoding="utf-8") as f:
+                    f.write(body)
+                applied.append(f"Wrote {path_val} ({len(body)} chars)")
+        except Exception as e:
+            applied.append(f"Failed {path_val}: {e}")
+    return applied
+
+# Expert selection based on task description
+_DEF_EXPERTS = [
+    ("security", "Security Reviewer", "Identify vulnerabilities and suggest remediations."),
+    ("perf", "Performance Analyzer", "Identify performance bottlenecks and optimizations."),
+    ("performance", "Performance Analyzer", "Identify performance bottlenecks and optimizations."),
+    ("frontend", "FrontEnd Expert", "Implement UI logic and ensure accessibility."),
+    ("backend", "Backend Expert", "Implement server logic, APIs, and data flows."),
+    ("deep", "DeepLearning Expert", "Design and optimize ML/DL pipelines."),
+    ("ml", "DeepLearning Expert", "Design and optimize ML/DL pipelines."),
+    ("biology", "Biology Expert", "Domain guidance for bio-related problems."),
+    ("physics", "Physics Expert", "Domain guidance for physics problems."),
+    ("math", "Mathematics Expert", "Formal reasoning and proofs."),
+    ("pharma", "Pharmaceutical Expert", "Drug development and regulations."),
+    ("business", "Business Expert", "Product and market strategy tradeoffs."),
+]
+
+
+_RESEARCH_DIR_PATTERN = re.compile(r"<<RESEARCH:\s*(.+?)>>", re.IGNORECASE)
+
+
+def _detect_research_directives(text: str) -> list[str]:
+    if not isinstance(text, str) or not text:
+        return []
+    return [m.strip() for m in _RESEARCH_DIR_PATTERN.findall(text) if m.strip()]
+
+
+def _perform_research_queries(queries: list[str], server) -> str:
+    """Run quick deep_research for each query and return a compact combined summary."""
+    chunks: list[str] = []
+    for q in queries[:3]:  # safety cap
+        try:
+            summary = handle_deep_research({"query": q, "time_limit": 90, "max_depth": 2}, server)
+            chunks.append(f"Query: {q}\n{_compact_text(summary, max_chars=1200)}")
+        except Exception as e:
+            chunks.append(f"Query: {q}\nError running research: {e}")
+    return "\n\n".join(chunks)
+
+# --- Multi-backend LLM selection for CrewAI ---
+
+
+
+# Utility: extract up to N queries from bullet-point text
+def _extract_queries_from_bullets(text: str, max_n: int = 3) -> list[str]:
+    queries: list[str] = []
+    for raw in (text or "").splitlines():
+        ln = raw.strip()
+        if not ln:
+            continue
+        # remove leading bullet markers
+        for prefix in ("- ", "* ", "• ", "1. ", "2. ", "3. "):
+            if ln.lower().startswith(prefix.strip()):
+                ln = ln[len(prefix):].strip()
+                break
+        # drop trailing reasons after ' - ' or ' — '
+        for sep in (" - ", " — "):
+            if sep in ln:
+                ln = ln.split(sep, 1)[0].strip()
+        if ln:
+            queries.append(ln)
+        if len(queries) >= max_n:
+            break
+    return queries
+
+# --- Multi-backend LLM selection for CrewAI ---
+
+def _build_llm_for_backend(backend: str):
+    try:
+        try:
+            from crewai import LLM  # type: ignore
+        except Exception:
+            from crewai.llm import LLM  # type: ignore
+        backend = (backend or "").lower()
+        if backend == "openai":
+            key = os.getenv("OPENAI_API_KEY", "").strip()
+            base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+            model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+            if not key:
+                return None
+            return LLM(model=model, api_key=key, base_url=base, temperature=0.2)
+        if backend == "anthropic":
+            key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+            base = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1")
+            model = os.getenv("ANTHROPIC_MODEL", "anthropic/claude-3-5-sonnet")
+            if not key:
+                return None
+            return LLM(model=model, api_key=key, base_url=base, temperature=0.2)
+        # default lmstudio
+        base = os.getenv("OPENAI_API_BASE", "http://localhost:1234/v1")
+        key = os.getenv("OPENAI_API_KEY", "sk-noauth")
+        model = os.getenv("LMSTUDIO_MODEL", "openai/gpt-oss-20b")
+        return LLM(model=model, api_key=key, base_url=base, temperature=0.2)
+    except Exception:
+        return None
+
+
+def _decide_backend_for_role(role: str, task_desc: str) -> str:
+    # Delegate to enhanced module first; fall back to built-in heuristics
+    try:
+        return _enh_decide_backend_for_role(role, task_desc)
+    except Exception:
+        pass
+    """Heuristic backend selection per role and task description.
+    - Complex reasoning (security, math, physics, deep learning): prefer anthropic, then openai, else lmstudio
+    - General coding (planner, scheduler, backend/frontend, coder, reviewer): lmstudio by default
+    - Allow override via AGENT_BACKEND_OVERRIDE (e.g., 'all=openai', 'security=anthropic')
+    """
+    override = os.getenv("AGENT_BACKEND_OVERRIDE", "").strip().lower()
+    if override:
+        # simple format: "all=openai" or "security=anthropic,math=openai"
+        try:
+            entries = [x.strip() for x in override.split(",") if x.strip()]
+            mapping = {}
+            for e in entries:
+                k, v = [p.strip() for p in e.split("=", 1)]
+                mapping[k] = v
+            key = role.lower().split()[0]
+            if key in mapping:
+                return mapping[key]
+            if "all" in mapping:
+                return mapping["all"]
+        except Exception:
+            pass
+
+    desc = (task_desc or "").lower()
+    role_l = (role or "").lower()
+    prefer_complex = any(w in role_l for w in ["security", "math", "physics", "deep", "pharma"]) or \
+        any(w in desc for w in ["formal proof", "vulnerability", "theorem", "derivation", "attack", "model eval"])
+
+    if prefer_complex:
+        if os.getenv("ANTHROPIC_API_KEY"):
+            return "anthropic"
+        if os.getenv("OPENAI_API_KEY"):
+            return "openai"
+        return "lmstudio"
+    # default
+    return "lmstudio"
+
+
+def handle_propose_research(arguments, server):
+    problem = (arguments.get("problem") or "").strip()
+    if not problem:
+        raise ValidationError("'problem' is required")
+    context = (arguments.get("context") or "").strip()
+    max_q = max(1, int(arguments.get("max_queries", 3)))
+    prompt = (
+        "You are a research planner. Propose up to N targeted research queries with 1-2 sentence reasons each. "
+        "Output them as bullet points in plain text.\n\n"
+        f"Problem: {problem}\nContext: {context}\nMax queries: {max_q}"
+    )
+    try:
+        try:
+            resp = asyncio.get_event_loop().run_until_complete(server.make_llm_request_with_retry(prompt, temperature=0.2))
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            resp = loop.run_until_complete(server.make_llm_request_with_retry(prompt, temperature=0.2))
+            loop.close()
+    except Exception as e:
+        resp = f"Error proposing research: {e}"
+    return _compact_text(resp, max_chars=4000)
+
+
+def _create_agent(role: str, goal: str, backstory: str, task_desc: str):
+    try:
+        from crewai import Agent  # type: ignore
+        backend = _decide_backend_for_role(role, task_desc)
+        llm = _build_llm_for_backend(backend)
+        kwargs = {"allow_delegation": False, "verbose": False}
+        if llm is not None:
+            kwargs["llm"] = llm
+        logger.info("Creating agent '%s' -> backend=%s model=%s", role, backend, getattr(llm, 'model', 'n/a'))
+        return Agent(role=role, goal=goal, backstory=backstory, **kwargs)
+    except Exception as e:
+        logger.warning("Failed to create agent '%s': %s", role, e)
+        return None
+
+
+
+def _select_experts(task_desc: str):
+    try:
+        from crewai import Agent  # type: ignore
+        llm = _make_crewai_llm()
+        base_kwargs = {"allow_delegation": False, "verbose": False}
+        if llm is not None:
+            base_kwargs["llm"] = llm
+        desc = (task_desc or "").lower()
+        agents = []
+        for key, role, goal in _DEF_EXPERTS:
+            if key in desc:
+                agents.append(Agent(role=role, goal=goal, backstory=f"Specialist in {role} concerns.", **base_kwargs))
+        # Provide generic FE/BE for code tasks if none matched
+        if not agents and any(w in desc for w in ["code", "refactor", "api", "ui", "frontend", "backend"]):
+            agents.extend([
+                Agent(role="Backend Expert", goal="Implement server logic.", backstory="Backend-focused engineer.", **base_kwargs),
+                Agent(role="FrontEnd Expert", goal="Implement UI logic.", backstory="Frontend-focused engineer.", **base_kwargs),
+            ])
+        return agents
+    except Exception:
+        return []
+
+
+def _make_crewai_llm():
+    try:
+        try:
+            from crewai import LLM  # type: ignore
+        except Exception:
+            from crewai.llm import LLM  # type: ignore
+        # Prefer LMSTUDIO_* if set, else fallback to OPENAI_* for compatibility
+        lmstudio_base = os.getenv("LMSTUDIO_API_BASE") or os.getenv("OPENAI_API_BASE", "http://localhost:1234/v1")
+        lmstudio_key = os.getenv("LMSTUDIO_API_KEY") or os.getenv("OPENAI_API_KEY", "sk-noauth")
+        hardwired_model = os.getenv("LMSTUDIO_MODEL", "openai/gpt-oss-20b")
+        return LLM(model=hardwired_model, base_url=lmstudio_base, api_key=lmstudio_key, temperature=0.2)
+    except Exception:
+        return None
+
+def _read_files_for_context(paths: list[str]) -> str:
+    parts = []
+    for p in paths or []:
+        try:
+            sp = _safe_path(p)
+            if sp.exists() and sp.is_file():
+                with open(sp, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                parts.append(f"# File: {p}\n{content}\n")
+        except Exception:
+            continue
+    return _compact_text("\n\n".join(parts), max_chars=4000)
+
+def handle_agent_team_plan_and_code(arguments, server):
+    task_desc = (arguments.get("task") or "").strip()
+    if not task_desc:
+        raise ValidationError("'task' is required")
+    target_files = arguments.get("target_files") or []
+    constraints = (arguments.get("constraints") or "").strip()
+    apply_changes = bool(arguments.get("apply_changes", False))
+    auto_research_rounds = int(arguments.get("auto_research_rounds", 0))
+
+    file_ctx = _read_files_for_context(target_files)
+
+    try:
+        # Allow tests or offline mode to force fallback
+        if os.getenv("AGENT_TEAM_FORCE_FALLBACK") == "1":
+            raise RuntimeError("forced_fallback")
+        from crewai import Agent, Crew, Task
+        llm = _make_crewai_llm()
+        base_kwargs = {"allow_delegation": False, "verbose": False}
+        if llm is not None:
+            base_kwargs["llm"] = llm
+
+        planner = Agent(role="Planner", goal="Create a practical, step-by-step plan to complete the task.", backstory="Senior tech lead who scopes and sequences work effectively.", **base_kwargs)
+        coder = Agent(role="Coder", goal="Draft clean, minimal code changes with clear diffs and tests.", backstory="Pragmatic engineer who favors readability and tests.", **base_kwargs)
+        reviewer = Agent(role="Reviewer", goal="Review the patch for correctness, safety, and tests.", backstory="Staff engineer who catches risks and improves tests.", **base_kwargs)
+
+        t_plan = Task(description=f"Task: {task_desc}\nConstraints: {constraints}\nFiles Context (truncated):\n{file_ctx}", agent=planner)
+        t_code = Task(description=(
+            f"Produce proposed code changes for: {target_files}. Prefer fenced code blocks. "
+            "For each code block, the FIRST non-empty line MUST be '# File: <relative/path>'. "
+            "If you propose multiple files, provide multiple fenced blocks, one per file. Include brief rationale and list of files changed."
+        ), agent=coder)
+        t_review = Task(description="Review the proposed changes and list concrete fixes or approvals. Ensure tests are present.", agent=reviewer)
+
+        # Optional orchestration & scheduling
+        experts = _select_experts(task_desc)
+        orchestrator = Agent(role="Orchestrator", goal="Choose relevant experts and coordinate their inputs.", backstory="Director who routes work to domain experts.", **base_kwargs)
+        scheduler = Agent(role="Scheduler", goal="Propose an execution order and parallelization plan.", backstory="PM who sequences work efficiently.", **base_kwargs)
+        # Orchestrator can decide whether research is needed; also parse inline directives like <<RESEARCH: topic>>
+        research_directives = _detect_research_directives(task_desc + "\n" + constraints)
+        research_summary = None
+        if research_directives:
+            logger.info("Research directives detected: %s", research_directives)
+            research_summary = _perform_research_queries(research_directives, server)
+
+        t_orch = Task(description=(
+            f"Given the task, select relevant experts and assign sub-goals. If more research is needed, say so explicitly and specify queries.\n\n"
+            f"Task: {task_desc}\nConstraints: {constraints}\n\nPrior Research (if any):\n{research_summary or 'n/a'}"
+        ), agent=orchestrator)
+        t_sched = Task(description="Propose an ordered list of steps for the team.", agent=scheduler)
+
+        crew = Crew(agents=[planner, coder, reviewer, orchestrator, scheduler] + experts, tasks=[t_plan, t_orch, t_sched, t_code, t_review], verbose=False)
+        out = str(crew.kickoff())
+        # Allow agents to request more research using inline directives in the first pass
+        post_directives = _detect_research_directives(out)
+        if post_directives:
+            logger.info("Post-run research directives detected: %s", post_directives)
+            post_research = _perform_research_queries(post_directives, server)
+            out += f"\n\n[Research Results]\n{post_research}"
+            if auto_research_rounds > 0:
+                auto_research_rounds = max(0, auto_research_rounds - 1)
+                # Minimal second pass prompt that includes research results
+                try:
+                    from crewai import Task
+                    t_refine = Task(description=(
+                        "Refine plan and code suggestions using the new research results. "
+                        "If patches changed, output updated fenced code blocks.\n\n"
+                        f"Research Results:\n{post_research}"
+                    ), agent=planner)
+                    crew2 = Crew(agents=[planner, coder, reviewer, orchestrator, scheduler] + experts, tasks=[t_refine], verbose=False)
+                    out2 = str(crew2.kickoff())
+                    out += "\n\n[Refine Pass]\n" + out2
+                except Exception as e2:
+                    out += f"\n\n[Refine Pass Error] {e2}"
+        if apply_changes:
+            dry = os.getenv("APPLY_DRY_RUN", "0").strip().lower() in {"1","true","yes","on"}
+            applied = _apply_proposed_changes(out, dry_run=dry)
+            header = "[Dry Run] Would apply changes" if dry else "[Applied changes]"
+            out += f"\n\n{header}\n" + "\n".join(applied)
+            logger.info("agent_team_plan_and_code apply_changes=%s dry_run=%s; applied: %s", apply_changes, dry, len(applied))
+        return _compact_text(out, max_chars=4000)
+    except Exception as e:
+        # Fallback: single-pass synthesis via LM Studio
+        prompt = (
+            "You are a planning and coding team. Given a task, optional constraints, and file context, "
+            "produce: (1) a concise plan, (2) proposed changes (diff or fenced code), (3) test suggestions.\n\n"
+            f"Task: {task_desc}\nConstraints: {constraints}\n\nFiles Context (truncated):\n{file_ctx}\n\nOutput steps 1-3."
+        )
+        try:
+            try:
+                resp = asyncio.get_event_loop().run_until_complete(server.make_llm_request_with_retry(prompt, temperature=0.2))
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                resp = loop.run_until_complete(server.make_llm_request_with_retry(prompt, temperature=0.2))
+                loop.close()
+        except Exception as e2:
+            resp = f"Error synthesizing plan: {e}; fallback failed: {e2}"
+        # Apply changes if requested and response includes fenced code blocks
+        if apply_changes:
+            applied = _apply_proposed_changes(resp)
+            resp += "\n\n[Applied changes]\n" + "\n".join(applied)
+        return _compact_text(resp, max_chars=4000)
+
+def handle_agent_team_review_and_test(arguments, server):
+    diff = (arguments.get("diff") or "").strip()
+    if not diff:
+        raise ValidationError("'diff' is required")
+    context = (arguments.get("context") or "").strip()
+
+    try:
+        if os.getenv("AGENT_TEAM_FORCE_FALLBACK") == "1":
+            raise RuntimeError("forced_fallback")
+        from crewai import Agent, Crew, Task
+        llm = _make_crewai_llm()
+        base_kwargs = {"allow_delegation": False, "verbose": False}
+        if llm is not None:
+            base_kwargs["llm"] = llm
+        reviewer = Agent(role="Reviewer", goal="Assess diff for correctness/risk and request fixes.", backstory="Thorough code reviewer.", **base_kwargs)
+        test_author = Agent(role="Test Author", goal="Propose focused tests (pytest).", backstory="Engineer who writes tests first.", **base_kwargs)
+        t_rev = Task(description=f"Review this diff and list issues, risks, and fixes. Context: {context}\n\nDiff:\n{diff}", agent=reviewer)
+        t_tests = Task(description=f"Propose pytest tests that validate the changes above. Provide fenced code blocks.", agent=test_author)
+        crew = Crew(agents=[reviewer, test_author], tasks=[t_rev, t_tests], verbose=False)
+        out = str(crew.kickoff())
+        return _compact_text(out, max_chars=4000)
+    except Exception as e:
+        # Fallback synthesis
+        prompt = (
+            "Review the following diff and produce: (1) review notes and risks, (2) pytest tests in fenced code blocks.\n\n"
+            f"Context: {context}\n\nDiff:\n{diff}"
+        )
+        try:
+            try:
+                resp = asyncio.get_event_loop().run_until_complete(server.make_llm_request_with_retry(prompt, temperature=0.2))
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                resp = loop.run_until_complete(server.make_llm_request_with_retry(prompt, temperature=0.2))
+                loop.close()
+        except Exception as e2:
+            resp = f"Error synthesizing review: {e}; fallback failed: {e2}"
+        return _compact_text(resp, max_chars=4000)
+
+def handle_agent_team_refactor(arguments, server):
+    module_path = (arguments.get("module_path") or "").strip()
+    goals = (arguments.get("goals") or "").strip()
+    if not module_path:
+        raise ValidationError("'module_path' is required")
+    content = _read_files_for_context([module_path])
+
+    try:
+        from crewai import Agent, Crew, Task
+        llm = _make_crewai_llm()
+        base_kwargs = {"allow_delegation": False, "verbose": False}
+        if llm is not None:
+            base_kwargs["llm"] = llm
+        refactorer = Agent(role="Refactorer", goal="Propose clearer, modular refactor with docstrings.", backstory="Engineer focused on readability and maintainability.", **base_kwargs)
+        qa = Agent(role="QA", goal="Ensure refactor preserves behavior; suggest tests.", backstory="QA who validates behavior.", **base_kwargs)
+        t_ref = Task(description=f"Refactor goals: {goals}. Provide a rationale and a refactored version in fenced code.\n\nCurrent content (truncated):\n{content}", agent=refactorer)
+        t_qa = Task(description="List behavioral risks, migration steps, and propose tests.", agent=qa)
+        crew = Crew(agents=[refactorer, qa], tasks=[t_ref, t_qa], verbose=False)
+        out = str(crew.kickoff())
+        return _compact_text(out, max_chars=4000)
+    except Exception as e:
+        prompt = (
+            "Given the current module content and refactor goals, propose: (1) rationale, (2) refactored code in fenced blocks, (3) tests.\n\n"
+            f"Goals: {goals}\n\nCurrent content (truncated):\n{content}"
+        )
+        try:
+            try:
+                resp = asyncio.get_event_loop().run_until_complete(server.make_llm_request_with_retry(prompt, temperature=0.2))
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                resp = loop.run_until_complete(server.make_llm_request_with_retry(prompt, temperature=0.2))
+                loop.close()
+        except Exception as e2:
+            resp = f"Error synthesizing refactor: {e}; fallback failed: {e2}"
+        return _compact_text(resp, max_chars=4000)
+
 
         # Find matching files under safe directory
         search_path = str(rp / "**" / file_pattern)

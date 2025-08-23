@@ -27,3 +27,16 @@ dist/
 .DS_Store
 Thumbs.db
 
+
+# Secrets (do not commit)
+.secrets/
+
+# Dotenv patterns
+.env.local
+.env.*.local
+*.env
+
+# Test/coverage caches
+.pytest_cache/
+.coverage*
+.hypothesis/
