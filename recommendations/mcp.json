@@ -1,13 +1,20 @@
 {
   "mcpServers": {
-    "lm": {
-      "command": "python",
-      "args": [
-        "C:\\Users\\mfeth\\.mcp-servers\\lmstudio-mcp\\server.py"
-      ],
+    "lmstudio-mcp": {
+      "type": "stdio",
+      "command": "py",
+      "args": ["-3", "-u", "C:\\Users\\mfeth\\.mcp-servers\\lmstudio-mcp\\server.py"],
       "env": {
+        "ALLOWED_BASE_DIR": "C:\\Users\\mfeth\\.mcp-servers\\lmstudio-mcp",
         "LM_STUDIO_URL": "http://localhost:1234",
-        "MODEL_NAME": "openai/gpt-oss-20b"
+        "MODEL_NAME": "openai/gpt-oss-20b",
+        "ENHANCED_STORAGE": "1",
+        "PYTHONUNBUFFERED": "1",
+        "OPENAI_MODEL": "gpt5",
+        "OPENAI_BASE_URL": "https://api.openai.com/v1",
+        "ANTHROPIC_MODEL": "claude-4-sonnet",
+        "ANTHROPIC_BASE_URL": "https://api.anthropic.com/v1",
+        "ANTHROPIC_VERSION": "2023-06-01"
       }
     }
   }

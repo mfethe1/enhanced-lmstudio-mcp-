@@ -1,4 +1,12 @@
 import asyncio
+# Optional robust router integration
+try:
+    from improvements.router import RouterAgent as RobustRouterAgent, Backend as RouterBackend, TaskProfile as RouterTaskProfile
+except Exception:  # noqa: E722
+    RobustRouterAgent = None
+    RouterBackend = None
+    RouterTaskProfile = None
+
 import json
 import sys
 import os
@@ -200,12 +208,14 @@ def _build_sequential_thinking_prompt(
     max_history: int = 10,
 ) -> str:
     """Compose a concise prompt for the LLM to suggest the next thought.
+
     Includes recent session thoughts, current problem (if provided), and constraints.
     """
     try:
         history = server.storage.get_thinking_session(session_id) or []
     except Exception:
         history = []
+
     # Use only the latest max_history entries
     recent = history[-max_history:]
     history_lines = []
@@ -237,6 +247,10 @@ def _build_sequential_thinking_prompt(
         "Output ONLY the suggested next thought(s) as bullets."
     )
     return prompt
+
+
+# TDD helpers
+_DEF_TEST_CMD = os.getenv("TEST_COMMAND", "pytest -q")
 
 
 # Safety and validation helpers (P0)
@@ -283,13 +297,24 @@ class EnhancedLMStudioMCPServer:
 
         # Initialize persistent storage: legacy facade wrapped by V2 selector when enabled
         self.storage = StorageSelector(_LegacyEnhanced())
+        # Initialize robust router agent if available (after storage is ready)
+        try:
+            self._router_agent = RobustRouterAgent(self.storage, self.base_url) if RobustRouterAgent else None
+        except Exception:
+            self._router_agent = None
         # Performance monitoring settings
         self.performance_threshold = float(os.getenv("PERFORMANCE_THRESHOLD", "0.2"))  # seconds
 
+        # Router logs (last ~200 decisions)
+        self._router_log = []
 
-        # Performance monitoring settings
-    async def make_llm_request_with_retry(self, prompt: str, temperature: float = 0.35, retries: int = 2, backoff: float = 0.5) -> str:
-        """Centralized LLM request with simple retry/backoff (P1)"""
+
+        # Router timing controls
+        self._router_last_call = {"lmstudio": 0.0, "openai": 0.0, "anthropic": 0.0}
+        self._router_min_interval = 1.0 / float(os.getenv("ROUTER_RATE_LIMIT_TPS", "5"))
+
+    async def _lmstudio_request_with_retry(self, prompt: str, temperature: float = 0.35, retries: int = 2, backoff: float = 0.5) -> str:
+        """Direct LM Studio request with simple retry/backoff (no routing)"""
         import requests
         attempt = 0
         last_err = None
@@ -301,9 +326,9 @@ class EnhancedLMStudioMCPServer:
                         "model": self.model_name,
                         "messages": [{"role": "user", "content": prompt}],
                         "temperature": temperature,
-                        "max_tokens": 2000
+                        "max_tokens": 4000
                     },
-                    timeout=(30, 120),
+                    timeout=(60, 240),
                     headers={"Content-Type": "application/json"}
                 )
                 if response.status_code == 200:
@@ -319,9 +344,177 @@ class EnhancedLMStudioMCPServer:
             await asyncio.sleep(backoff * attempt)
         return f"Error: LLM request failed after {retries+1} attempts: {last_err}"
 
-        self.performance_threshold = float(os.getenv("PERFORMANCE_THRESHOLD", "0.2"))  # 200ms
+    async def make_llm_request_with_retry(self, prompt: str, temperature: float = 0.35, retries: int = 2, backoff: float = 0.5) -> str:
+        """Centralized LLM request; optionally routes across providers if enabled."""
+        if os.getenv("ROUTER_WRAP_MLR", "1").lower() in {"1","true","yes","on"}:
+            return await self.route_chat(prompt, temperature=temperature)
+        return await self._lmstudio_request_with_retry(prompt, temperature=temperature, retries=retries, backoff=backoff)
 
-        logger.info("Enhanced MCP Server initialized with persistent storage")
+
+    def _router_wait(self, backend: str):
+        now = time.time()
+        last = self._router_last_call.get(backend, 0.0)
+        gap = now - last
+        if gap < self._router_min_interval:
+            time.sleep(self._router_min_interval - gap)
+        self._router_last_call[backend] = time.time()
+
+
+    async def decide_backend_via_router(self, prompt: str, intent: str | None = None, role: str | None = None) -> dict:
+        """Ask a lightweight local router agent (LM Studio) to choose a backend.
+        Returns a dict like {backend, reason, confidence, preferred_model}.
+        Backends: anthropic | openai | lmstudio.
+        """
+        schema_hint = (
+            "Respond ONLY in JSON with keys: backend(one of 'anthropic','openai','lmstudio'), "
+            "reason, confidence (0..1), preferred_model (string)."
+        )
+        router_prompt = (
+            f"You are a router agent for coding tasks. Decide best backend.\n"
+            f"Intent: {intent or 'general'} | Role: {role or 'none'}\n"
+            f"Task preview (truncated):\n{_compact_text(prompt, 700)}\n\n{schema_hint}"
+        )
+        try:
+            raw = await self.make_llm_request_with_retry(router_prompt, temperature=0.0, retries=1, backoff=0.2)
+            try:
+                data = json.loads(raw.strip())
+                if isinstance(data, dict) and data.get('backend') in {'anthropic','openai','lmstudio'}:
+                    return data
+            except Exception:
+                pass
+        except Exception:
+            pass
+        return {"backend": None, "reason": "router_failed"}
+
+    async def route_chat(self, prompt: str, *, intent: str | None = None, complexity: str | None = "auto", role: str | None = None, preferred_backend: str | None = None, temperature: float = 0.2) -> str:
+        """Intelligent multi-model routing with fallback chain and optional router agent.
+        Preference order: preferred_backend -> router_agent -> heuristic -> lmstudio. Fallbacks: lmstudio -> openai -> anthropic.
+        """
+        decision = {"intent": intent, "role": role, "temperature": temperature}
+        model_override = None
+        # 1) Preferred backend overrides
+        backend = (preferred_backend or "").lower()
+        source = "preferred" if backend else None
+        # 2) Robust RouterAgent (from improvements/) if available
+        if not backend and self._router_agent is not None:
+            try:
+                task = await self._router_agent.analyze_task(prompt, intent=intent, role=role)
+                if complexity and complexity != "auto":
+                    task.complexity = complexity
+                dec = await self._router_agent.decide_routing(task)
+                backend = dec.backend.value if hasattr(dec, 'backend') else None
+                model_override = getattr(dec, 'model', None)
+                source = "router_agent"
+                decision.update({"agent": {"backend": backend, "model": model_override, "confidence": getattr(dec, 'confidence', None)}})
+            except Exception as e:
+                logger.warning("RouterAgent decision failed: %s", e)
+        # 3) Lightweight JSON router agent (LM Studio) if enabled and still unknown
+        if not backend and os.getenv("ROUTER_USE_AGENT", "1").lower() in {"1","true","yes","on"}:
+            agent_dec = await self.decide_backend_via_router(prompt, intent=intent, role=role)
+            b = (agent_dec.get("backend") or "").lower()
+            if b in {"anthropic","openai","lmstudio"}:
+                backend, source = b, "router_agent"
+                model_override = agent_dec.get("preferred_model") or model_override
+                decision.update({"agent_json": agent_dec})
+        # 4) Heuristic fallback if still unknown
+        if not backend:
+            text = (prompt or "").lower()
+            complex_markers = ["architecture", "design", "vulnerability", "formal", "proof", "theorem", "deep analysis", "multi-step"]
+            is_complex = any(w in text for w in complex_markers) or (complexity == "high") or (intent in {"analysis","architecture","validation"})
+            if is_complex and os.getenv("ANTHROPIC_API_KEY"):
+                backend = "anthropic"
+            elif is_complex and os.getenv("OPENAI_API_KEY"):
+                backend = "openai"
+            else:
+                backend = "lmstudio"
+            source = source or "heuristic"
+        decision["backend"] = backend
+        decision["source"] = source
+        decision["model_override"] = model_override
+        logger.info("Router selected backend=%s via %s intent=%s role=%s", backend, source, intent, role)
+
+        # Per-backend params
+        max_tokens = int(os.getenv("ROUTER_MAX_TOKENS", "4000"))
+        t0 = time.time()
+        try:
+            if backend == "openai" and os.getenv("OPENAI_API_KEY"):
+                self._router_wait("openai")
+                import requests
+                base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+                model = (model_override or os.getenv("OPENAI_MODEL", "gpt5"))
+                decision["model"] = model
+                r = requests.post(
+                    f"{base}/chat/completions",
+                    headers={"Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}", "Content-Type": "application/json"},
+                    json={"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": temperature, "max_tokens": max_tokens},
+                    timeout=(60, 240)
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    out = _sanitize_llm_output(data.get("choices", [{}])[0].get("message", {}).get("content", ""))
+                    decision.update({"latency_ms": int((time.time()-t0)*1000), "success": True})
+                    self._router_log.append(decision); self._router_log[:] = self._router_log[-200:]
+                    return out
+                logger.warning("OpenAI error %s: %s", r.status_code, r.text[:200])
+                decision.update({"latency_ms": int((time.time()-t0)*1000), "success": False, "error": f"http {r.status_code}"})
+                self._router_log.append(decision); self._router_log[:] = self._router_log[-200:]
+            if backend == "anthropic" and os.getenv("ANTHROPIC_API_KEY"):
+                self._router_wait("anthropic")
+                import requests
+                base = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1")
+                model = (model_override or os.getenv("ANTHROPIC_MODEL", "claude-4-sonnet"))
+                decision["model"] = model
+                r = requests.post(
+                    f"{base}/messages",
+                    headers={
+                        "x-api-key": os.getenv("ANTHROPIC_API_KEY"),
+                        "anthropic-version": os.getenv("ANTHROPIC_VERSION", "2023-06-01"),
+                        "content-type": "application/json",
+                    },
+                    json={"model": model, "max_tokens": max_tokens, "temperature": temperature, "messages": [{"role": "user", "content": prompt}]},
+                    timeout=(60, 240)
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    parts = data.get("content", [])
+                    txt = "".join([p.get("text", "") for p in parts if isinstance(p, dict)])
+                    out = _sanitize_llm_output(txt)
+                    decision.update({"latency_ms": int((time.time()-t0)*1000), "success": True})
+                    self._router_log.append(decision); self._router_log[:] = self._router_log[-200:]
+                    return out
+                logger.warning("Anthropic error %s: %s", r.status_code, r.text[:200])
+                decision.update({"latency_ms": int((time.time()-t0)*1000), "success": False, "error": f"http {r.status_code}"})
+                self._router_log.append(decision); self._router_log[:] = self._router_log[-200:]
+            # Default LM Studio
+            self._router_wait("lmstudio")
+            out = await self._lmstudio_request_with_retry(prompt, temperature=temperature)
+            decision.update({"model": self.model_name, "latency_ms": int((time.time()-t0)*1000), "success": True})
+            self._router_log.append(decision); self._router_log[:] = self._router_log[-200:]
+            return out
+        except Exception as e:
+            logger.warning("Router primary failed (%s). Falling back: %s", backend, e)
+            decision.update({"latency_ms": int((time.time()-t0)*1000), "success": False, "error": str(e), "fallback": True})
+            self._router_log.append(decision); self._router_log[:] = self._router_log[-200:]
+            # Fallback chain
+            try:
+                self._router_wait("lmstudio")
+                out = await self._lmstudio_request_with_retry(prompt, temperature=temperature)
+                return out
+            except Exception as e2:
+                try:
+                    if os.getenv("OPENAI_API_KEY"):
+                        return await self.route_chat(prompt, preferred_backend="openai", temperature=temperature)
+                except Exception:
+                    pass
+                try:
+                    if os.getenv("ANTHROPIC_API_KEY"):
+                        return await self.route_chat(prompt, preferred_backend="anthropic", temperature=temperature)
+                except Exception:
+                    pass
+                return f"Error: routing failed: {e2}"
+
+
+
 
     def monitor_performance(self, func_name: str):
         """Decorator for monitoring tool performance"""
@@ -373,9 +566,9 @@ class EnhancedLMStudioMCPServer:
                     "model": self.model_name,
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": temperature,
-                    "max_tokens": 2000
+                    "max_tokens": 4000
                 },
-                timeout=(30, 120),
+                timeout=(60, 240),
                 headers={"Content-Type": "application/json"}
             )
 
@@ -493,7 +686,10 @@ def get_all_tools():
                     "type": "object",
                     "properties": {
                         "diff": {"type": "string", "description": "Proposed diff or code snippet to review"},
-                        "context": {"type": "string", "description": "Additional context (optional)"}
+                        "context": {"type": "string", "description": "Additional context (optional)"},
+                        "apply_fixes": {"type": "boolean", "description": "If true, apply proposed tests/fixes", "default": False},
+                        "max_loops": {"type": "integer", "description": "Test/fix iterations", "default": 1},
+                        "test_command": {"type": "string", "description": "Command to run tests (e.g., 'pytest -q')"}
                     },
                     "required": ["diff"]
                 }
@@ -542,8 +738,38 @@ def get_all_tools():
             {
                 "name": "audit_search",
                 "description": "Search immutable audit trail with simple filters",
-                "inputSchema": {"type": "object", "properties": {"action_type": {"type": "string"}, "level": {"type": "string"}, "tool_name": {"type": "string"}}, "required": []}
             },
+
+            # Smart task router (function router)
+            {
+                "name": "smart_task",
+                "description": "Smart router: send a natural instruction and it will select and invoke the right tool(s).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "instruction": {"type": "string"},
+                        "context": {"type": "string"},
+                        "dry_run": {"type": "boolean", "default": False}
+                    },
+                    "required": ["instruction"]
+                }
+            },
+            {
+                "name": "smart_plan_execute",
+                "description": "Plan a multi-step tool workflow and (optionally) execute it.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "instruction": {"type": "string"},
+                        "context": {"type": "string"},
+                        "dry_run": {"type": "boolean", "default": False},
+                        "max_steps": {"type": "integer", "default": 4}
+                    },
+                    "required": ["instruction"]
+                }
+            },
+
+
             {
                 "name": "audit_verify_integrity",
                 "description": "Verify the audit chain integrity",
@@ -591,19 +817,51 @@ def get_all_tools():
             },
             {
                 "name": "agent_collaborate",
-                "description": "Run a simple multi-round, multi-role collaboration session and synthesize a plan.",
-                "inputSchema": {"type":"object","properties":{"task":{"type":"string"},"roles":{"type":"array","items":{"type":"string"},"default":["Researcher","Developer","Reviewer"]},"rounds":{"type":"integer","default":2}}, "required":["task"]}
+                "description": "Run a multi-round, multi-role collaboration session and synthesize a plan.",
+                "inputSchema": {"type":"object","properties":{
+                  "task":{"type":"string"},
+                  "roles":{"type":"array","items":{"type":"string"}},
+                  "specialized":{"type":"boolean","default":True},
+                  "rounds":{"type":"integer","default":2},
+                  "session_id":{"type":"string"}
+                }, "required":["task"]}
             },
             {
                 "name": "reflect",
                 "description": "Critique and improve content using reflection loops.",
-                "inputSchema": {"type":"object","properties":{"content":{"type":"string"},"criteria":{"type":"string"},"rounds":{"type":"integer","default":1}}, "required":["content"]}
+                "inputSchema": {"type":"object","properties":{"content":{"type":"string"},"criteria":{"type":"string"},"rounds":{"type":"integer","default":1},"session_id":{"type":"string"}}, "required":["content"]}
             },
             {
                 "name": "tool_match",
                 "description": "Suggest relevant MCP tools for a task via semantic keyword matching.",
                 "inputSchema": {"type":"object","properties":{"task":{"type":"string"}}, "required":["task"]}
             },
+            {
+                "name": "router_diagnostics",
+                "description": "Show recent router decisions and latencies.",
+                "inputSchema": {"type":"object","properties":{"limit":{"type":"integer","default":20}}}
+            },
+            {
+                "name": "router_test",
+                "description": "Test router decision for a given task without executing.",
+                "inputSchema": {"type":"object","properties":{"task":{"type":"string"},"role":{"type":"string"},"intent":{"type":"string"},"complexity":{"type":"string","enum":["low","medium","high","auto"],"default":"auto"}}, "required":["task"]}
+            },
+            {
+                "name": "router_update_profile",
+                "description": "Update backend profile (performance/capabilities)",
+                "inputSchema": {"type":"object","properties":{"backend":{"type":"string","enum":["lmstudio","openai","anthropic"]},"updates":{"type":"object"}}, "required":["backend","updates"]}
+            },
+            {
+                "name": "router_battery",
+                "description": "Run a structured router test suite and return JSON report.",
+                "inputSchema": {"type":"object","properties":{"cases":{"type":"array","items":{"type":"object"}},"limit":{"type":"integer","default":3}}}
+            },
+            {
+                "name": "router_self_test",
+                "description": "Run a quick router test battery and return a report.",
+                "inputSchema": {"type":"object","properties":{}}
+            },
+
             {
                 "name": "memory_consolidate",
                 "description": "Summarize recent memories of a category into semantic_memory.",
@@ -616,6 +874,14 @@ def get_all_tools():
             },
 
             {"name": "import_graph", "description": "Build a simple Python import graph and report top nodes.", "inputSchema": {"type":"object","properties":{"directory":{"type":"string","default":"."},"limit":{"type":"integer","default":10}}}},
+            {"name": "session_create", "description": "Create a collaboration session (V2).", "inputSchema": {"type":"object","properties":{"session_id":{"type":"string"},"participants":{"type":"array","items":{"type":"string"}},"initial_task":{"type":"string"}}, "required":["initial_task"]}},
+
+            {"name": "context_envelope_create", "description": "Create a V2 context envelope (ENHANCED_STORAGE=1).", "inputSchema": {"type":"object","properties":{"session_id":{"type":"string"},"context_type":{"type":"string"},"content":{"type":"object"},"metadata":{"type":"object","default":{}},"parent_envelope_id":{"type":"string"},"ttl_seconds":{"type":"integer"}}, "required":["session_id","context_type","content"]}},
+            {"name": "context_envelopes_list", "description": "List context envelopes for a session (V2).", "inputSchema": {"type":"object","properties":{"session_id":{"type":"string"},"limit":{"type":"integer","default":50}}, "required":["session_id"]}},
+            {"name": "artifact_create", "description": "Create a collaborative artifact (V2).", "inputSchema": {"type":"object","properties":{"session_id":{"type":"string"},"artifact_type":{"type":"string"},"title":{"type":"string"},"content":{"type":"string"},"contributors":{"type":"array","items":{"type":"string"}},"tags":{"type":"array","items":{"type":"string"}},"parent_artifact_id":{"type":"string"}}, "required":["session_id","artifact_type","title","content","contributors"]}},
+            {"name": "artifacts_list", "description": "List artifacts for a session (V2).", "inputSchema": {"type":"object","properties":{"session_id":{"type":"string"},"limit":{"type":"integer","default":50}}, "required":["session_id"]}},
+            {"name": "session_analytics", "description": "Return analytics for a collaboration session (V2).", "inputSchema": {"type":"object","properties":{"session_id":{"type":"string"}}, "required":["session_id"]}},
+
             {"name": "file_scaffold", "description": "Create a new module or test skeleton.", "inputSchema": {"type":"object","properties":{"path":{"type":"string"},"kind":{"type":"string","enum":["module","test"]},"description":{"type":"string"},"dry_run":{"type":"boolean","default":True}}, "required":["path","kind"]}}
         ]
     }
@@ -800,7 +1066,7 @@ def handle_deep_research(arguments, server):
                 resp = None
                 for url in urls_to_try:
                     try:
-                        r = requests.post(url, json=payload, headers=headers, timeout=(15, 120))
+                        r = requests.post(url, json=payload, headers=headers, timeout=(30, 240))
                         # Prefer first success; if 404, try next URL
                         if r.status_code == 404:
                             resp = r
@@ -984,9 +1250,21 @@ def handle_tool_call(message):
             # Collaboration/Reflection/Memory tools
             "agent_collaborate": (handle_agent_collaborate, True),
             "reflect": (handle_reflect, True),
+            "smart_plan_execute": (handle_smart_plan_execute, True),
             "tool_match": (handle_tool_match, True),
             "memory_consolidate": (handle_memory_consolidate, True),
             "memory_retrieve_semantic": (handle_memory_retrieve_semantic, True),
+
+            # Router tools
+            "router_diagnostics": (handle_router_diagnostics, True),
+            "router_test": (handle_router_test, True),
+            # TDD
+            "tdd_flow": (handle_tdd_flow, False),
+            "router_update_profile": (handle_router_update_profile, True),
+            "router_battery": (handle_router_battery, True),
+            # Smart router
+            "smart_task": (handle_smart_task, True),
+            "router_self_test": (handle_router_self_test, True),
 
             # Diagnostics & analysis
             "backend_diagnostics": (handle_backend_diagnostics, True),
@@ -1014,6 +1292,15 @@ def handle_tool_call(message):
             "workflow_explain": (handle_workflow_explain, True),
             "workflow_execute": (handle_workflow_execute, True),
 
+            # Session management (V2)
+            "session_create": (handle_session_create, True),
+
+            # V2 context and artifact tools
+            "context_envelope_create": (handle_context_envelope_create, True),
+            "context_envelopes_list": (handle_context_envelopes_list, True),
+            "artifact_create": (handle_artifact_create, True),
+            "artifacts_list": (handle_artifacts_list, True),
+            "session_analytics": (handle_session_analytics, True),
         }
 
 
@@ -1025,11 +1312,36 @@ def handle_tool_call(message):
             }
 
         handler, needs_server = registry[tool_name]
-        monitored = server.monitor_performance(tool_name)
-        if needs_server:
-            result = monitored(handler)(arguments, server)
-        else:
-            result = monitored(handler)(arguments)
+        # Tool execution auditing + timing
+        start_ts = time.time()
+        session_id = arguments.get("session_id") or f"sess_{uuid4().hex[:8]}"
+        agent_role = arguments.get("agent_role") or "system"
+        error_details = None
+        result_type = "success"
+        try:
+            monitored = server.monitor_performance(tool_name)
+            if needs_server:
+                result = monitored(handler)(arguments, server)
+            else:
+                result = monitored(handler)(arguments)
+        except Exception as exc:
+            error_details = str(exc)
+            result_type = "error"
+            # Log usage on error as well
+            try:
+                server.storage.log_tool_usage(
+                    tool_name=tool_name,
+                    agent_role=agent_role,
+                    session_id=session_id,
+                    parameters={k: (v if isinstance(v, (int, float, bool, str)) else str(v)) for k, v in (arguments or {}).items()},
+                    result_type=result_type,
+                    execution_time_ms=int((time.time() - start_ts) * 1000),
+                    success=False,
+                    error_details=error_details,
+                )
+            except Exception:
+                pass
+            raise
 
         # After handler executes successfully, audit the tool call
         try:
@@ -1043,6 +1355,21 @@ def handle_tool_call(message):
                     context={"args": arguments, "ts": time.time()},
                     compliance_tags=[tool_name, "tool_execution"],
                 )
+        except Exception:
+            pass
+
+        # Log tool usage success
+        try:
+            server.storage.log_tool_usage(
+                tool_name=tool_name,
+                agent_role=agent_role,
+                session_id=session_id,
+                parameters={k: (v if isinstance(v, (int, float, bool, str)) else str(v)) for k, v in (arguments or {}).items()},
+                result_type=result_type,
+                execution_time_ms=int((time.time() - start_ts) * 1000),
+                success=True,
+                error_details=None,
+            )
         except Exception:
             pass
 
@@ -1105,6 +1432,8 @@ def handle_sequential_thinking(arguments, server):
     # Optional context to aid LLM suggestion
     problem = arguments.get("problem")
     auto_next = bool(arguments.get("auto_next", False))
+
+
 
     # Store thinking step in persistent storage (always record user-provided step)
     server.storage.store_thinking_step(
@@ -1575,16 +1904,16 @@ def handle_workflow_explain(arguments, server):
 
 # --- Collaboration, Reflection, Tool Match, Memory (follow-up recs) ---
 
-def _run_llm(server, prompt: str, temperature: float = 0.2) -> str:
+def _run_llm(server, prompt: str, temperature: float = 0.2, intent: str | None = None, role: str | None = None) -> str:
     try:
         return asyncio.get_event_loop().run_until_complete(
-            server.make_llm_request_with_retry(prompt, temperature=temperature)
+            server.route_chat(prompt, temperature=temperature, intent=intent, role=role)
         )
     except RuntimeError:
         loop = asyncio.new_event_loop()
         try:
             asyncio.set_event_loop(loop)
-            return loop.run_until_complete(server.make_llm_request_with_retry(prompt, temperature=temperature))
+            return loop.run_until_complete(server.route_chat(prompt, temperature=temperature, intent=intent, role=role))
         finally:
             loop.close()
     except Exception as e:
@@ -1595,7 +1924,7 @@ def handle_agent_collaborate(arguments, server):
     task = (arguments.get("task") or "").strip()
     if not task:
         raise ValidationError("'task' is required")
-    roles = arguments.get("roles") or ["Researcher", "Developer", "Reviewer"]
+    roles = arguments.get("roles") or ["Researcher", "Developer", "Reviewer", "Security Reviewer"]
     rounds = int(arguments.get("rounds", 2))
     history: list[dict] = []
     for r in range(1, rounds + 1):
@@ -1607,7 +1936,7 @@ def handle_agent_collaborate(arguments, server):
                 f"Recent context (may be partial):\n{context}\n\n"
                 "Contribute succinct bullet points (<=6) with concrete, technical steps and call out any risks or dependencies."
             )
-            note = _run_llm(server, prompt)
+            note = _run_llm(server, prompt, intent="collaboration", role=role)
             note = _compact_text(note, 900)
             history.append({"role": role, "round": r, "note": note})
             round_notes.append({"role": role, "note": note})
@@ -1618,15 +1947,31 @@ def handle_agent_collaborate(arguments, server):
         "Respond in JSON with keys: goals (list), plan (list), risks (list), open_questions (list).\n\n"
         f"Transcript:\n{_compact_text(transcript, 3500)}\n"
     )
-    plan_txt = _run_llm(server, synth_prompt, temperature=0.1)
-    # Persist a compact artifact
-    ts = int(time.time())
-    server.storage.store_memory(
-        key=f"collab_{ts}",
-        value=json.dumps({"task": task, "roles": roles, "rounds": rounds, "synthesis": plan_txt[:1000]}),
-        category="collab_session",
-    )
-    return {"rounds": rounds, "roles": roles, "synthesis": plan_txt}
+    plan_txt = _run_llm(server, synth_prompt, temperature=0.1, intent="synthesis", role="Planner")
+    # V2: use provided session or create one, then persist artifact
+    session_id = (arguments.get("session_id") or f"sess_{int(time.time())}")
+    try:
+        server.storage.create_collaboration_session(
+            session_id=session_id,
+            session_type="agent_collaboration",
+            participants=roles,
+            initial_task=task,
+            complexity_analysis={"rounds": rounds}
+        )
+    except Exception:
+        pass
+    try:
+        server.storage.create_artifact(
+            session_id=session_id,
+            artifact_type="plan",
+            title=f"Synthesis for: {task[:60]}",
+            content=plan_txt,
+            contributors=roles,
+            tags=["collaboration", "synthesis"]
+        )
+    except Exception:
+        pass
+    return {"rounds": rounds, "roles": roles, "synthesis": plan_txt, "session_id": session_id}
 
 
 def handle_reflect(arguments, server):
@@ -1637,18 +1982,30 @@ def handle_reflect(arguments, server):
     rounds = int(arguments.get("rounds", 1))
     current = content
     last_critique = None
+    combined_critiques = []
     for i in range(rounds):
         critique_prompt = (
             f"Critique the following content against these criteria: {criteria}.\n"
             "List concrete issues as bullets and suggest precise fixes.\n\nCONTENT:\n" + _compact_text(current, 2500)
         )
+
+
         last_critique = _run_llm(server, critique_prompt, temperature=0.2)
+        combined_critiques.append(last_critique)
         improve_prompt = (
             f"Improve the content by applying the critique (keep original intent).\nCriteria: {criteria}.\n"
             "Return only the improved content, no preface.\n\nCRITIQUE:\n" + _compact_text(last_critique, 1200) + "\n\nCONTENT:\n" + _compact_text(current, 2500)
         )
         current = _run_llm(server, improve_prompt, temperature=0.2)
-    return {"improved": current, "last_critique": last_critique}
+    # V2: persist critique and improved content as an artifact (no-op on legacy)
+    try:
+        sid = (arguments.get("session_id") or f"sess_reflect_{int(time.time())}")
+        server.storage.create_collaboration_session(sid, 'reflection', ['reflector'], f"Reflection: {current[:40]}")
+        server.storage.create_artifact(sid, 'analysis', 'Reflection Critique', "\n\n".join(combined_critiques), ['reflector'], tags=['reflection','critique'])
+        server.storage.create_artifact(sid, 'analysis', 'Improved Content', current, ['reflector'], tags=['reflection','improved'])
+    except Exception:
+        sid = arguments.get("session_id") or None
+    return {"improved": current, "last_critique": last_critique, "session_id": sid}
 
 
 def handle_tool_match(arguments, server):
@@ -1691,6 +2048,493 @@ def handle_memory_consolidate(arguments, server):
     server.storage.store_memory(key=key, value=json.dumps({"summary": summary, "source_count": len(texts)}), category="semantic_memory")
     return {"key": key, "summary": summary}
 
+# --- V2 MCP wrappers: context and artifacts ---
+def handle_session_create(arguments, server):
+    session_id = (arguments.get('session_id') or f"sess_{uuid4().hex[:8]}")
+    participants = arguments.get('participants') or []
+    task = (arguments.get('initial_task') or '').strip()
+    if not task:
+        raise ValidationError('initial_task is required')
+    try:
+        server.storage.create_collaboration_session(session_id=session_id, session_type='manual', participants=participants, initial_task=task)
+    except Exception:
+        server.storage.store_memory(key=f'session_{session_id}', value=json.dumps({'participants':participants,'task':task}), category='session')
+    return {'session_id': session_id}
+
+
+def handle_context_envelope_create(arguments, server):
+    sid = (arguments.get('session_id') or '').strip()
+    ctype = (arguments.get('context_type') or '').strip()
+    content = arguments.get('content') or {}
+    metadata = arguments.get('metadata') or {}
+    parent = arguments.get('parent_envelope_id')
+    ttl = arguments.get('ttl_seconds')
+    if not (sid and ctype and isinstance(content, dict)):
+        raise ValidationError('session_id, context_type, content required')
+    try:
+        eid = server.storage.create_context_envelope(session_id=sid, context_type=ctype, content=content, metadata=metadata, parent_envelope_id=parent, ttl_seconds=ttl)
+    except AttributeError:
+        # Legacy storage: emulate by storing memory and returning a pseudo id
+        eid = f"env_legacy_{int(time.time())}"
+        server.storage.store_memory(key=eid, value=json.dumps({'session_id':sid,'context_type':ctype,'content':content,'metadata':metadata}), category='context_envelope')
+    return {'envelope_id': eid}
+
+
+def handle_context_envelopes_list(arguments, server):
+    sid = (arguments.get('session_id') or '').strip()
+    limit = int(arguments.get('limit', 50))
+    if not sid:
+        raise ValidationError('session_id required')
+    try:
+        items = server.storage.list_context_envelopes(session_id=sid, limit=limit)
+    except AttributeError:
+        items = []
+    return {'envelopes': items}
+
+
+def handle_artifact_create(arguments, server):
+    sid = (arguments.get('session_id') or '').strip()
+    atype = (arguments.get('artifact_type') or '').strip()
+    title = (arguments.get('title') or '').strip()
+    content = (arguments.get('content') or '')
+    contributors = arguments.get('contributors') or []
+    tags = arguments.get('tags') or []
+    parent = arguments.get('parent_artifact_id')
+    if not (sid and atype and title and contributors is not None):
+        raise ValidationError('session_id, artifact_type, title, content, contributors required')
+    try:
+        aid = server.storage.create_artifact(session_id=sid, artifact_type=atype, title=title, content=content, contributors=contributors, tags=tags, parent_artifact_id=parent)
+    except AttributeError:
+        aid = f"art_legacy_{int(time.time())}"
+        server.storage.store_memory(key=aid, value=json.dumps({'session_id':sid,'artifact_type':atype,'title':title,'content':content,'contributors':contributors,'tags':tags}), category='artifact')
+    return {'artifact_id': aid}
+
+# Router self-test tool
+async def _router_self_test(server) -> str:
+    cases = [
+        {"task": "Draft architecture and threat model for a microservices system", "intent": "analysis", "role": "Reviewer"},
+        {"task": "Refactor a Python module to improve readability and add tests", "intent": "implementation", "role": "Developer"},
+        {"task": "Research the best practices for MCP server routing", "intent": "research", "role": "Researcher"},
+    ]
+    lines = []
+    for c in cases:
+        try:
+            dec = await server.route_chat(f"Router decision only for: {c['task']}", intent=c['intent'], role=c['role'])
+            lines.append(f"Case: {c['role']}/{c['intent']} -> decided (see router_diagnostics for details)")
+        except Exception as e:
+            lines.append(f"Case: {c['role']}/{c['intent']} -> error {e}")
+    return "\n".join(lines)
+
+def handle_router_self_test(arguments, server):
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            new_loop = asyncio.new_event_loop(); asyncio.set_event_loop(new_loop)
+            try:
+                out = new_loop.run_until_complete(_router_self_test(server))
+            finally:
+                new_loop.close(); asyncio.set_event_loop(loop)
+            return out
+        else:
+            return loop.run_until_complete(_router_self_test(server))
+    except Exception as e:
+        return f"Router self-test failed: {e}"
+
+# Router battery tool (structured)
+
+def handle_router_battery(arguments, server):
+    cases = arguments.get('cases') or [
+        {"task": "Architect scalable pipeline", "intent": "analysis", "role": "Reviewer"},
+        {"task": "Refactor Python module", "intent": "implementation", "role": "Developer"},
+        {"task": "Research MCP routing best practices", "intent": "research", "role": "Researcher"},
+    ]
+    limit = int(arguments.get('limit', 3))
+    report = []
+    async def decide(task, intent, role):
+        # Invoke route_chat but we return only the backend/model via diagnostics side effect
+        try:
+            text = await server.route_chat(f"Router decision only for: {task}", intent=intent, role=role)
+            return True, text[:40]
+        except Exception as e:
+            return False, str(e)
+    for c in cases[:limit]:
+        ok = True; note = ''
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                new_loop = asyncio.new_event_loop(); asyncio.set_event_loop(new_loop)
+                try:
+                    ok, note = new_loop.run_until_complete(decide(c.get('task',''), c.get('intent'), c.get('role')))
+                finally:
+                    new_loop.close(); asyncio.set_event_loop(loop)
+            else:
+                ok, note = loop.run_until_complete(decide(c.get('task',''), c.get('intent'), c.get('role')))
+        except Exception as e:
+            ok, note = False, str(e)
+        report.append({"case": c, "ok": ok, "note": note})
+    # add latest diagnostics
+    try:
+        diags = handle_router_diagnostics({"limit": 10}, server)
+    except Exception:
+        diags = {}
+    return json.dumps({"report": report, "diagnostics": diags})
+
+# Smart function router: maps a natural instruction to a specific tool call
+
+SMART_RULES = [
+    {"match": ["plan", "code", "implement"], "tool": "agent_team_plan_and_code"},
+    {"match": ["review", "test", "pytest"], "tool": "agent_team_review_and_test"},
+    {"match": ["research", "investigate", "sources"], "tool": "deep_research"},
+    {"match": ["refactor", "cleanup", "modular"], "tool": "agent_team_refactor"},
+]
+
+
+# --- Schema helpers for smart routing ---
+
+def _get_tool_schemas():
+    tools = get_all_tools().get("tools", [])
+    schemas = {}
+    for t in tools:
+        name = t.get("name")
+        schema = t.get("inputSchema") or {}
+        if name:
+            schemas[name] = schema
+    return schemas
+
+
+def _coerce_value_to_type(value, typ):
+    try:
+        if typ == "string":
+            return str(value)
+        if typ == "integer":
+            if isinstance(value, bool):
+                return int(value)
+            return int(str(value).strip())
+        if typ == "boolean":
+            if isinstance(value, bool):
+                return value
+            s = str(value).strip().lower()
+            return s in {"1", "true", "yes", "on"}
+        if typ == "array":
+            if isinstance(value, list):
+                return value
+            if value is None or value == "":
+                return []
+            return [v.strip() for v in str(value).split(",") if v.strip()]
+        if typ == "object":
+            if isinstance(value, dict):
+                return value
+            try:
+                return json.loads(value)
+            except Exception:
+                return {}
+    except Exception:
+        return value
+    return value
+
+
+def _autocorrect_args(args, schema, context, instruction):
+    props = (schema or {}).get("properties", {})
+    required = (schema or {}).get("required", [])
+    corrected = dict(args or {})
+    corrections = {}
+
+    # Coerce provided values to expected types
+    for key, meta in props.items():
+        if key in corrected and isinstance(meta, dict) and "type" in meta:
+            before = corrected[key]
+            after = _coerce_value_to_type(corrected[key], meta.get("type"))
+            if before is not after:
+                corrections[key] = {"from": before, "to": after}
+                corrected[key] = after
+
+    # Fill required fields
+    for key in required:
+        if key not in corrected or corrected.get(key) in (None, ""):
+            meta = props.get(key, {})
+            if "default" in meta:
+                corrected[key] = meta["default"]
+                corrections[key] = {"filled_default": True}
+            elif meta.get("type") == "string" and context:
+                corrected[key] = context
+                corrections[key] = {"filled_from": "context"}
+            elif meta.get("type") == "string" and instruction:
+                corrected[key] = instruction
+                corrections[key] = {"filled_from": "instruction"}
+            elif meta.get("type") == "integer":
+                corrected[key] = 1
+                corrections[key] = {"filled_default_int": True}
+            elif meta.get("type") == "boolean":
+                corrected[key] = False
+                corrections[key] = {"filled_default_bool": True}
+            elif meta.get("type") == "array":
+                corrected[key] = []
+                corrections[key] = {"filled_default_array": True}
+            elif meta.get("type") == "object":
+                corrected[key] = {}
+                corrections[key] = {"filled_default_object": True}
+
+    # Special mapping hints for common tools
+    # If tool expects 'diff' and we have only instruction/context
+    if 'diff' in props and 'diff' not in corrected:
+        if instruction:
+            corrected['diff'] = instruction
+            corrections['diff'] = {"filled_from": "instruction"}
+        elif context:
+            corrected['diff'] = context
+            corrections['diff'] = {"filled_from": "context"}
+
+    if 'task' in props and 'task' not in corrected and instruction:
+        corrected['task'] = instruction
+        corrections['task'] = {"filled_from": "instruction"}
+
+    if 'query' in props and 'query' not in corrected and instruction:
+        corrected['query'] = instruction
+        corrections['query'] = {"filled_from": "instruction"}
+
+    return corrected, corrections
+
+
+def _validate_args_against_schema(args, schema):
+    props = (schema or {}).get("properties", {})
+    required = (schema or {}).get("required", [])
+    errors = []
+    for key in required:
+        if key not in args or args.get(key) in (None, ""):
+            errors.append(f"Missing required: {key}")
+    for key, meta in props.items():
+        if key in args and isinstance(meta, dict) and "type" in meta:
+            t = meta.get("type")
+            val = args[key]
+            if t == "string" and not isinstance(val, str):
+                errors.append(f"{key} expected string")
+            if t == "integer" and not isinstance(val, int):
+                errors.append(f"{key} expected integer")
+            if t == "boolean" and not isinstance(val, bool):
+                errors.append(f"{key} expected boolean")
+            if t == "array" and not isinstance(val, list):
+                errors.append(f"{key} expected array")
+            if t == "object" and not isinstance(val, dict):
+                errors.append(f"{key} expected object")
+    return (len(errors) == 0), errors
+
+
+def _smart_match_rule(instruction: str) -> str | None:
+    text = (instruction or "").lower()
+    for rule in SMART_RULES:
+        if any(k in text for k in rule.get("match", [])):
+            return rule.get("tool")
+    return None
+
+
+def handle_smart_task(arguments, server):
+    instruction = (arguments.get('instruction') or '').strip()
+    context = (arguments.get('context') or '').strip()
+    dry_run = bool(arguments.get('dry_run', False))
+    if not instruction:
+        raise ValidationError('instruction is required')
+
+    # 1) Static rule match first
+    tool = _smart_match_rule(instruction)
+
+    # 2) If ambiguous, ask the router via LM Studio to select tool + args + confidence
+    schemas = _get_tool_schemas()
+    proposed_args = {}
+    confidence = 0.0
+    if not tool:
+        schema_hint = "Respond ONLY with JSON: {\"tool\": <tool_name>, \"arguments\": {...}, \"confidence\": 0..1}"
+        prompt = (
+            f"You are a function router. Choose the best tool for the user's instruction and propose arguments.\n{schema_hint}\n"
+            f"Instruction: {instruction}\nContext: {context}\n"
+            f"Known tools: {', '.join(schemas.keys())}"
+        )
+        try:
+            raw = asyncio.get_event_loop().run_until_complete(server.route_chat(prompt, intent='routing', role='Router'))
+        except RuntimeError:
+            loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
+            raw = loop.run_until_complete(server.route_chat(prompt, intent='routing', role='Router')); loop.close()
+        try:
+            data = json.loads((raw or '').strip())
+            if isinstance(data, dict):
+                tool = data.get('tool') or tool
+                proposed_args = data.get('arguments') or {}
+                try:
+                    confidence = float(data.get('confidence') or 0.0)
+                except Exception:
+                    confidence = 0.0
+        except Exception:
+            pass
+
+    # 3) If still unknown, return options
+    if not tool:
+        return json.dumps({"selected": None, "options": [r['tool'] for r in SMART_RULES], "note": "ambiguous"})
+
+# --- Multi-tool planning and execution ---
+
+def handle_smart_plan_execute(arguments, server):
+    instruction = (arguments.get('instruction') or '').strip()
+    context = (arguments.get('context') or '').strip()
+    dry_run = bool(arguments.get('dry_run', False))
+    max_steps = int(arguments.get('max_steps', 4))
+    if not instruction:
+        raise ValidationError('instruction is required')
+
+    # Step 1: ask Router role for a plan [{tool, arguments, note}]
+    schemas = _get_tool_schemas()
+    plan_prompt = (
+        "Return ONLY JSON: {\"steps\": [{\"tool\": <name>, \"arguments\": {...}, \"note\": <string>}]}.\n"
+        f"Instruction: {instruction}\nContext: {context}\nKnown tools: {', '.join(schemas.keys())}\n"
+        f"Max steps: {max_steps}. Ensure arguments satisfy required fields if possible."
+    )
+    try:
+        raw = asyncio.get_event_loop().run_until_complete(server.route_chat(plan_prompt, intent='routing', role='Router'))
+    except RuntimeError:
+        loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
+        raw = loop.run_until_complete(server.route_chat(plan_prompt, intent='routing', role='Router')); loop.close()
+    steps = []
+    try:
+        data = json.loads((raw or '').strip())
+        steps = data.get('steps') or []
+    except Exception:
+        steps = []
+
+    # Step 2: validate and auto-correct step args
+    state = {"artifacts": [], "logs": []}
+    validated = []
+    for i, s in enumerate(steps[:max_steps]):
+        tool = s.get('tool'); args = s.get('arguments') or {}
+        sch = schemas.get(tool) or {}
+        corrected, corr = _autocorrect_args(args, sch, context, instruction)
+        ok, errs = _validate_args_against_schema(corrected, sch)
+        validated.append({"tool": tool, "arguments": corrected, "valid": ok, "errors": errs, "corrections": corr, "note": s.get('note')})
+
+    if dry_run:
+        return json.dumps({"plan": validated})
+
+    # Step 3: execute steps sequentially with basic rollback/error handling
+    results = []
+    applied_writes = []
+    for i, st in enumerate(validated):
+        tool = st.get('tool'); args = st.get('arguments')
+        if not tool:
+            state['logs'].append({"step": i, "error": "missing tool"}); break
+        message = {"params": {"name": tool, "arguments": args}}
+        res = handle_tool_call(message)
+        results.append({"step": i, "tool": tool, "result": res})
+        # Track write operations from known tools to allow rollback
+        if tool in {"write_file_content", "file_scaffold"}:
+            try:
+                # Best-effort: parse result preview to guess path
+                txt = _to_text_content(res)
+                if "Would write" in txt:
+                    # dry-run; no rollback needed
+                    pass
+                else:
+                    applied_writes.append(txt)
+            except Exception:
+                pass
+        # Save intermediate artifact
+        try:
+            preview = _to_text_content(res)[:512]
+            state['artifacts'].append({"step": i, "tool": tool, "preview": preview})
+        except Exception:
+            pass
+
+    return json.dumps({"plan": validated, "results": results, "state": state})
+
+
+    # 4) Schema-aware argument inference & validation
+    target_schema = schemas.get(tool) or {}
+    args0 = dict(proposed_args) if isinstance(proposed_args, dict) else {}
+    corrected, corrections = _autocorrect_args(args0, target_schema, context, instruction)
+    ok, errs = _validate_args_against_schema(corrected, target_schema)
+
+    summary = {"selected": tool, "confidence": confidence, "corrections": corrections, "valid": ok, "errors": errs}
+    if dry_run:
+        return json.dumps({**summary, "invoked": False, "arguments": corrected})
+
+    # 5) Dispatch via existing registry
+    message = {"params": {"name": tool, "arguments": corrected}}
+    return handle_tool_call(message)
+
+
+def handle_artifacts_list(arguments, server):
+    sid = (arguments.get('session_id') or '').strip()
+    limit = int(arguments.get('limit', 50))
+    if not sid:
+        raise ValidationError('session_id required')
+    try:
+        items = server.storage.list_artifacts(session_id=sid, limit=limit)
+    except AttributeError:
+        items = []
+    return {'artifacts': items}
+
+
+def handle_session_analytics(arguments, server):
+    # Placeholder to satisfy interface; return minimal data if storage lacks analytics
+    sid = (arguments.get('session_id') or '').strip()
+    limit = int(arguments.get('limit', 50))
+    if not sid:
+        raise ValidationError('session_id required')
+    try:
+        # If storage provides analytics, return them; otherwise return recent artifacts as a proxy
+        if hasattr(server.storage, 'get_session_analytics'):
+            return server.storage.get_session_analytics(session_id=sid, limit=limit)
+        if hasattr(server.storage, 'list_artifacts'):
+            arts = server.storage.list_artifacts(session_id=sid, limit=limit)
+            return {'artifacts': arts}
+    except Exception:
+        pass
+    return {'message': 'analytics not available'}
+
+# TDD orchestration tool: generate tests -> run -> fix loop
+
+def handle_tdd_flow(arguments, server):
+    target_path = (arguments.get('target_path') or '').strip()
+    goal = (arguments.get('goal') or '').strip()
+    max_loops = int(arguments.get('max_loops', 2))
+    apply_fixes = bool(arguments.get('apply_fixes', False))
+    test_command = (arguments.get('test_command') or _DEF_TEST_CMD)
+    if not target_path:
+        raise ValidationError('target_path is required')
+
+    transcript = []
+
+    # 1) Generate initial tests
+    gen_prompt = (
+        f"Write focused pytest tests for {target_path}. Goal: {goal or 'improve reliability and correctness.'} "
+        "Return one or more fenced code blocks where the FIRST non-empty line is '# File: <relative/test_path>.py'."
+    )
+    tests_text = _run_llm(server, gen_prompt, intent='tdd', role='Test Author')
+    transcript.append({'stage': 'generate_tests', 'content': _compact_text(tests_text, 2000)})
+
+    # Optionally apply proposed tests
+    if apply_fixes:
+        applied = _apply_proposed_changes(tests_text, dry_run=False)
+        transcript.append({'stage': 'apply_tests', 'applied': applied})
+
+    # 2) Loop: run tests -> fix -> run again
+    for i in range(max_loops):
+        run_out = handle_test_execution({'test_command': test_command})
+        transcript.append({'stage': f'test_run_{i+1}', 'result': _compact_text(run_out, 2000)})
+        if 'failed' not in run_out.lower() and 'error' not in run_out.lower():
+            break
+        # Ask Developer to propose minimal fixes given failures
+        fix_prompt = (
+            f"Tests failed for {target_path}. Test output (truncated):\n{_compact_text(run_out, 2000)}\n\n"
+            "Propose minimal code changes to fix failures. Use fenced blocks; each block's first non-empty line must be '# File: <path>'."
+        )
+        fix_text = _run_llm(server, fix_prompt, intent='implementation', role='Developer')
+        transcript.append({'stage': f'fix_proposal_{i+1}', 'content': _compact_text(fix_text, 2000)})
+        if apply_fixes:
+            applied = _apply_proposed_changes(fix_text, dry_run=False)
+            transcript.append({'stage': f'apply_fix_{i+1}', 'applied': applied})
+
+    return json.dumps(transcript)
+
+
+
+
 
 def handle_memory_retrieve_semantic(arguments, server):
     query = (arguments.get("query") or "").lower()
@@ -1711,6 +2555,111 @@ def handle_memory_retrieve_semantic(arguments, server):
             continue
     items.sort(key=lambda x: x["score"], reverse=True)
     return {"results": items[:limit]}
+
+
+# Router tools
+_router_history: list[dict] = []
+
+def handle_router_diagnostics(arguments, server):
+    lim = int(arguments.get('limit', 20))
+    # Prefer robust router analytics if available
+    try:
+        if getattr(server, '_router_agent', None) is not None:
+            try:
+                # call async analytics synchronously
+                try:
+                    data = asyncio.get_event_loop().run_until_complete(server._router_agent.get_router_analytics(hours=24))
+                except RuntimeError:
+                    loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
+                    data = loop.run_until_complete(server._router_agent.get_router_analytics(hours=24)); loop.close()
+                # include recent decisions as well
+                recent = server.storage.retrieve_memory(category='router_decisions', limit=lim) or []
+                return {"analytics": data, "recent": [json.loads(m.get('value','{}')) for m in recent if isinstance(m.get('value'), str)]}
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # Fallback to in-memory log
+    try:
+        hist = list(server._router_log)[-lim:]
+    except Exception:
+        hist = []
+    return {'decisions': hist}
+
+
+def handle_router_test(arguments, server):
+    task = (arguments.get('task') or '').strip()
+    if not task:
+        raise ValidationError('task is required')
+    role = arguments.get('role')
+    intent = arguments.get('intent')
+    complexity = arguments.get('complexity', 'auto')
+    # Prefer robust router
+    backend = None; model = None; confidence = None; reasoning = None
+    try:
+        if getattr(server, '_router_agent', None) is not None:
+            try:
+                try:
+                    task_prof = asyncio.get_event_loop().run_until_complete(server._router_agent.analyze_task(task, intent=intent, role=role))
+                except RuntimeError:
+                    loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
+                    task_prof = loop.run_until_complete(server._router_agent.analyze_task(task, intent=intent, role=role)); loop.close()
+                if complexity != 'auto':
+                    task_prof.complexity = complexity
+                try:
+                    dec = asyncio.get_event_loop().run_until_complete(server._router_agent.decide_routing(task_prof))
+                except RuntimeError:
+                    loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
+                    dec = loop.run_until_complete(server._router_agent.decide_routing(task_prof)); loop.close()
+                backend = dec.backend.value if hasattr(dec, 'backend') else None
+                model = getattr(dec, 'model', None)
+                confidence = getattr(dec, 'confidence', None)
+                reasoning = getattr(dec, 'reasoning', None)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # Fallback to lightweight JSON router if still unknown
+    if not backend:
+        try:
+            try:
+                agent_dec = asyncio.get_event_loop().run_until_complete(server.decide_backend_via_router(task, intent=intent, role=role))
+            except RuntimeError:
+                loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
+                agent_dec = loop.run_until_complete(server.decide_backend_via_router(task, intent=intent, role=role)); loop.close()
+            backend = (agent_dec.get('backend') or '').lower()
+            model = agent_dec.get('preferred_model') or model
+            confidence = agent_dec.get('confidence', confidence)
+            reasoning = agent_dec.get('reason', reasoning)
+        except Exception:
+            pass
+    if not backend:
+        backend = 'lmstudio'
+        reasoning = reasoning or 'heuristic default'
+    return f"Backend: {backend}\nModel: {model or 'auto'}\nConfidence: {confidence if confidence is not None else 'n/a'}\nComplexity: {complexity}\nReason: {reasoning or 'n/a'}"
+
+
+def handle_router_update_profile(arguments, server):
+    if getattr(server, '_router_agent', None) is None:
+        return 'Router agent not available'
+    backend = (arguments.get('backend') or '').lower()
+    updates = arguments.get('updates') or {}
+    if not backend or not updates:
+        raise ValidationError('backend and updates are required')
+    # Map string to enum if present
+    try:
+        from improvements.router import Backend as B
+        bmap = {'lmstudio': B.LMSTUDIO, 'openai': B.OPENAI, 'anthropic': B.ANTHROPIC}
+        be = bmap.get(backend)
+        prof = server._router_agent.backend_profiles.get(be)
+        if not prof:
+            return 'Unknown backend'
+        for k, v in updates.items():
+            if hasattr(prof, k):
+                setattr(prof, k, v)
+        return 'Profile updated'
+    except Exception as e:
+        return f'Error updating profile: {e}'
 
 
 
@@ -1883,14 +2832,14 @@ def _build_llm_for_backend(backend: str):
         if backend == "openai":
             key = os.getenv("OPENAI_API_KEY", "").strip()
             base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-            model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+            model = os.getenv("OPENAI_MODEL", "gpt5")
             if not key:
                 return None
             return LLM(model=model, api_key=key, base_url=base, temperature=0.2)
         if backend == "anthropic":
             key = os.getenv("ANTHROPIC_API_KEY", "").strip()
             base = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1")
-            model = os.getenv("ANTHROPIC_MODEL", "anthropic/claude-3-5-sonnet")
+            model = os.getenv("ANTHROPIC_MODEL", "claude-4-sonnet")
             if not key:
                 return None
             return LLM(model=model, api_key=key, base_url=base, temperature=0.2)
@@ -2144,11 +3093,19 @@ def handle_agent_team_review_and_test(arguments, server):
     if not diff:
         raise ValidationError("'diff' is required")
     context = (arguments.get("context") or "").strip()
+    apply_fixes = bool(arguments.get("apply_fixes", False))
+    max_loops = int(arguments.get("max_loops", 1))
+    test_command = (arguments.get("test_command") or _DEF_TEST_CMD)
 
     try:
         if os.getenv("AGENT_TEAM_FORCE_FALLBACK") == "1":
             raise RuntimeError("forced_fallback")
-        from crewai import Agent, Crew, Task
+        Agent = globals().get("Agent")
+        Crew = globals().get("Crew")
+        Task = globals().get("Task")
+        if not (Agent and Crew and Task):
+            from crewai import Agent as _CAAgent, Crew as _CACrew, Task as _CATask
+            Agent, Crew, Task = _CAAgent, _CACrew, _CATask
         llm = _make_crewai_llm()
         base_kwargs = {"allow_delegation": False, "verbose": False}
         if llm is not None:
@@ -2159,6 +3116,33 @@ def handle_agent_team_review_and_test(arguments, server):
         t_tests = Task(description=f"Propose pytest tests that validate the changes above. Provide fenced code blocks.", agent=test_author)
         crew = Crew(agents=[reviewer, test_author], tasks=[t_rev, t_tests], verbose=False)
         out = str(crew.kickoff())
+
+        # Apply tests if provided
+        applied_tests = []
+        if apply_fixes:
+            applied_tests = _apply_proposed_changes(out, dry_run=False)
+            out += "\n\n[Applied tests]\n" + "\n".join(applied_tests)
+
+        # Run tests and loop minimal fixes if requested
+        transcript = []
+        for i in range(max_loops):
+            run_out = handle_test_execution({"test_command": test_command})
+            transcript.append({"stage": f"test_run_{i+1}", "result": _compact_text(run_out, 1500)})
+            if 'failed' not in run_out.lower() and 'error' not in run_out.lower():
+                break
+            # Route developer for minimal fix proposals
+            fix_prompt = (
+                f"Review found issues; tests failing. Provide minimal fixes in fenced blocks. Context: {context}\n\nDiff:\n{diff}\n\n"
+                f"Test output (truncated):\n{_compact_text(run_out, 1500)}"
+            )
+            fix_text = _run_llm(server, fix_prompt, intent='implementation', role='Developer')
+            out += "\n\n[Fix Proposal]\n" + _compact_text(fix_text, 2000)
+            if apply_fixes:
+                applied = _apply_proposed_changes(fix_text, dry_run=False)
+                out += "\n\n[Applied fix]\n" + "\n".join(applied)
+        # Append transcript summary
+        if transcript:
+            out += "\n\n[Test Transcript]\n" + "\n".join([json.dumps(t) for t in transcript])
         return _compact_text(out, max_chars=4000)
     except Exception as e:
         # Fallback synthesis
