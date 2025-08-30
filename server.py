@@ -430,6 +430,54 @@ class EnhancedLMStudioMCPServer:
             source = source or "heuristic"
         decision["backend"] = backend
         decision["source"] = source
+
+        def _is_complex_text(prompt_text: str, intent_str: str | None, complexity_hint: str | None) -> bool:
+            text = (prompt_text or "").lower()
+            complex_markers = [
+                "architecture", "design", "vulnerability", "formal", "proof",
+                "theorem", "deep analysis", "multi-step", "refactor", "optimize",
+            ]
+            return (
+                any(w in text for w in complex_markers)
+                or (complexity_hint == "high")
+                or (intent_str in {"analysis", "architecture", "validation"})
+            )
+
+        def _select_anthropic_model(role_str: str | None, intent_str: str | None, complexity_hint: str | None, prompt_text: str, agent_conf: float | None, default_model: str) -> str:
+            """Smart switch between Sonnet/Opus.
+            Env flags:
+              - ANTHROPIC_SMART_SWITCH (default: on)
+              - OVERSEER_USE_OPUS (default: on) + ANTHROPIC_MODEL_OVERSEER (default: claude-4-opus)
+              - ANTHROPIC_MODEL_COMPLEX (default: claude-4-opus)
+              - OPUS_FOR_ANALYSIS (default: on)
+              - OPUS_FOR_LOW_CONF (default: on) + LOW_CONF_THRESHOLD (default: 0.5)
+            """
+            try:
+                if os.getenv("ANTHROPIC_SMART_SWITCH", "1").strip().lower() not in {"1","true","yes","on"}:
+                    return default_model
+                role_l = (role_str or "").strip().lower()
+                intent_l = (intent_str or "").strip().lower()
+                # 1) Overseer/Reviewer override
+                if os.getenv("OVERSEER_USE_OPUS", "1").strip().lower() in {"1","true","yes","on"} and role_l in {"overseer","reviewer"}:
+                    return os.getenv("ANTHROPIC_MODEL_OVERSEER", "claude-4-opus")
+                # 2) Complexity-based
+                if _is_complex_text(prompt_text, intent_l, complexity_hint):
+                    return os.getenv("ANTHROPIC_MODEL_COMPLEX", "claude-4-opus")
+                # 3) Intent-based analysis
+                if intent_l in {"analysis","architecture","validation"} and os.getenv("OPUS_FOR_ANALYSIS", "1").strip().lower() in {"1","true","yes","on"}:
+                    return os.getenv("ANTHROPIC_MODEL_COMPLEX", "claude-4-opus")
+                # 4) Low-confidence from router agent
+                if os.getenv("OPUS_FOR_LOW_CONF", "1").strip().lower() in {"1","true","yes","on"}:
+                    try:
+                        thr = float(os.getenv("LOW_CONF_THRESHOLD", "0.5"))
+                        if agent_conf is not None and float(agent_conf) < thr:
+                            return os.getenv("ANTHROPIC_MODEL_COMPLEX", "claude-4-opus")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            return default_model
+
         decision["model_override"] = model_override
         logger.info("Router selected backend=%s via %s intent=%s role=%s", backend, source, intent, role)
 
@@ -462,7 +510,13 @@ class EnhancedLMStudioMCPServer:
                 self._router_wait("anthropic")
                 import requests
                 base = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1")
-                model = (model_override or os.getenv("ANTHROPIC_MODEL", "claude-4-sonnet"))
+                default_model = (model_override or os.getenv("ANTHROPIC_MODEL", "claude-4-sonnet"))
+                agent_conf = None
+                try:
+                    agent_conf = decision.get("agent", {}).get("confidence") or decision.get("agent_json", {}).get("confidence")
+                except Exception:
+                    pass
+                model = select_anthropic_model(role, intent, complexity, prompt, agent_conf, default_model) if not model_override else default_model
                 decision["model"] = model
                 r = requests.post(
                     f"{base}/messages",
@@ -853,8 +907,16 @@ def get_all_tools():
             },
             {
                 "name": "router_battery",
-                "description": "Run a structured router test suite and return JSON report.",
-                "inputSchema": {"type":"object","properties":{"cases":{"type":"array","items":{"type":"object"}},"limit":{"type":"integer","default":3}}}
+                "description": "Run a structured router test suite and return JSON report with metrics and gating.",
+                "inputSchema": {"type":"object","properties":{
+                    "cases":{"type":"array","items":{"type":"object"}},
+                    "limit":{"type":"integer","default":3},
+                    "thresholds":{"type":"object","properties":{
+                        "min_anthropic":{"type":"number","default":0},
+                        "max_lmstudio_latency_ms":{"type":"number","default":1000000000},
+                        "min_high_conf":{"type":"number","default":0}
+                    }}
+                }}
             },
             {
                 "name": "router_self_test",
@@ -2177,7 +2239,55 @@ def handle_router_battery(arguments, server):
         diags = handle_router_diagnostics({"limit": 10}, server)
     except Exception:
         diags = {}
-    return json.dumps({"report": report, "diagnostics": diags})
+    # Enhanced metrics
+    metrics = {"backend_counts": {}, "model_counts": {}, "avg_latency_ms": {}, "confidence": {"low":0,"med":0,"high":0}}
+    # Extract decisions from diagnostics
+    try:
+        if isinstance(diags, dict) and 'analytics' in diags and isinstance(diags['analytics'], dict):
+            items = diags['analytics'].get('decisions') or diags['analytics'].get('history') or []
+        elif isinstance(diags, dict) and 'decisions' in diags:
+            items = diags['decisions']
+        else:
+            items = []
+    except Exception:
+        items = []
+    lat_sum = {}
+    lat_cnt = {}
+    for d in items:
+        try:
+            b = (d.get('backend') or '').lower(); m = d.get('model') or 'auto'
+            metrics['backend_counts'][b] = metrics['backend_counts'].get(b,0)+1
+            metrics['model_counts'][m] = metrics['model_counts'].get(m,0)+1
+            lat = d.get('latency_ms');
+            if isinstance(lat, (int,float)):
+                lat_sum[b] = lat_sum.get(b,0)+float(lat); lat_cnt[b] = lat_cnt.get(b,0)+1
+            conf = d.get('confidence');
+            if isinstance(conf, (int,float)):
+                if conf < 0.34: metrics['confidence']['low'] += 1
+                elif conf < 0.67: metrics['confidence']['med'] += 1
+                else: metrics['confidence']['high'] += 1
+        except Exception:
+            continue
+    for b in lat_sum:
+        metrics['avg_latency_ms'][b] = round(lat_sum[b]/max(1,lat_cnt[b]), 2)
+
+    # CI gating thresholds
+    thr = arguments.get('thresholds') or {}
+    res_ok = True
+    reasons = []
+    # Example gates: require some non-zero Anthropic/OpenAI usage, and cap LM Studio avg latency
+    min_anthropic = float(thr.get('min_anthropic', 0))
+    if metrics['backend_counts'].get('anthropic',0) < min_anthropic:
+        res_ok = False; reasons.append(f"anthropic_count<{min_anthropic}")
+    max_lmstudio_latency = float(thr.get('max_lmstudio_latency_ms', 1e9))
+    if metrics['avg_latency_ms'].get('lmstudio',0) > max_lmstudio_latency:
+        res_ok = False; reasons.append("lmstudio_latency")
+    min_high_conf = float(thr.get('min_high_conf', 0))
+    total_conf = sum(metrics['confidence'].values()) or 1
+    if (metrics['confidence']['high']/total_conf) < min_high_conf:
+        res_ok = False; reasons.append("low_high_conf_fraction")
+
+    return json.dumps({"report": report, "diagnostics": diags, "metrics": metrics, "passed": res_ok, "reasons": reasons})
 
 # Smart function router: maps a natural instruction to a specific tool call
 
@@ -2233,11 +2343,12 @@ def _coerce_value_to_type(value, typ):
     return value
 
 
-def _autocorrect_args(args, schema, context, instruction):
+def _autocorrect_args(args, schema, context, instruction, prevent_fill_keys: set | None = None):
     props = (schema or {}).get("properties", {})
     required = (schema or {}).get("required", [])
     corrected = dict(args or {})
     corrections = {}
+    block = set(prevent_fill_keys or [])
 
     # Coerce provided values to expected types
     for key, meta in props.items():
@@ -2274,25 +2385,14 @@ def _autocorrect_args(args, schema, context, instruction):
                 corrected[key] = {}
                 corrections[key] = {"filled_default_object": True}
 
-    # Special mapping hints for common tools
-    # If tool expects 'diff' and we have only instruction/context
-    if 'diff' in props and 'diff' not in corrected:
-        if instruction:
-            corrected['diff'] = instruction
-            corrections['diff'] = {"filled_from": "instruction"}
-        elif context:
-            corrected['diff'] = context
-            corrections['diff'] = {"filled_from": "context"}
-
-    if 'task' in props and 'task' not in corrected and instruction:
-        corrected['task'] = instruction
-        corrections['task'] = {"filled_from": "instruction"}
 
     if 'query' in props and 'query' not in corrected and instruction:
         corrected['query'] = instruction
         corrections['query'] = {"filled_from": "instruction"}
 
     return corrected, corrections
+
+
 
 
 def _validate_args_against_schema(args, schema):
@@ -2316,6 +2416,9 @@ def _validate_args_against_schema(args, schema):
                 errors.append(f"{key} expected array")
             if t == "object" and not isinstance(val, dict):
                 errors.append(f"{key} expected object")
+            enum = meta.get("enum")
+            if enum is not None and val not in enum:
+                errors.append(f"{key} must be one of {enum}")
     return (len(errors) == 0), errors
 
 
@@ -2331,6 +2434,7 @@ def handle_smart_task(arguments, server):
     instruction = (arguments.get('instruction') or '').strip()
     context = (arguments.get('context') or '').strip()
     dry_run = bool(arguments.get('dry_run', False))
+    max_refines = int(arguments.get('max_refines', os.getenv('SMART_TASK_MAX_REFINES', '2')))
     if not instruction:
         raise ValidationError('instruction is required')
 
@@ -2368,6 +2472,62 @@ def handle_smart_task(arguments, server):
     # 3) If still unknown, return options
     if not tool:
         return json.dumps({"selected": None, "options": [r['tool'] for r in SMART_RULES], "note": "ambiguous"})
+
+    # 4) Schema-aware argument inference & validation + refinement loop
+    target_schema = schemas.get(tool) or {}
+    args_current = dict(proposed_args) if isinstance(proposed_args, dict) else {}
+    refine_attempts = []
+    for i in range(max(1, max_refines+1)):
+        corrected, corrections = _autocorrect_args(args_current, target_schema, context, instruction)
+        ok, errs = _validate_args_against_schema(corrected, target_schema)
+        attempt_meta = {"iteration": i, "arguments": corrected, "corrections": corrections, "valid": ok, "errors": errs}
+        refine_attempts.append(attempt_meta)
+        if ok or max_refines == 0:
+            break
+        # ask router to refine arguments
+        if server is None:
+            break
+        try:
+            err_text = "\n".join(errs)
+            minimal_schema = {
+                "required": (target_schema or {}).get("required", []),
+                "properties": {k: {"type": v.get("type"), **({"enum": v.get("enum")} if v.get("enum") else {})} for k, v in (target_schema or {}).get("properties", {}).items()}
+            }
+            refine_prompt = (
+                "Your proposed arguments did not validate against the tool schema.\n"
+                "Return ONLY JSON for the corrected arguments object, no prose.\n"
+                f"Tool: {tool}\n"
+                f"Schema: {json.dumps(minimal_schema)}\n"
+                f"Current arguments: {json.dumps(corrected)}\n"
+                f"Validation errors: {err_text}\n"
+            )
+            try:
+                raw2 = asyncio.get_event_loop().run_until_complete(server.route_chat(refine_prompt, intent='routing', role='Router'))
+            except RuntimeError:
+                loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
+                raw2 = loop.run_until_complete(server.route_chat(refine_prompt, intent='routing', role='Router')); loop.close()
+            try:
+                new_args = json.loads((raw2 or '').strip())
+                if isinstance(new_args, dict):
+                    args_current = new_args
+                else:
+                    break
+            except Exception:
+                break
+        except Exception:
+            break
+
+    final_corrected, corrections = _autocorrect_args(args_current, target_schema, context, instruction)
+    ok, errs = _validate_args_against_schema(final_corrected, target_schema)
+
+    summary = {"selected": tool, "confidence": confidence, "valid": ok, "errors": errs, "refine_attempts": refine_attempts}
+    if dry_run:
+        return json.dumps({**summary, "invoked": False, "arguments": final_corrected})
+
+    # 5) Dispatch via existing registry
+    message = {"params": {"name": tool, "arguments": final_corrected}}
+    return handle_tool_call(message)
+
 
 # --- Multi-tool planning and execution ---
 
