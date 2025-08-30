@@ -10,12 +10,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import server as mcp_server
 
-# Config
+# Config (read most values once; token is read dynamically for tests that monkeypatch env)
 REMOTE_ENABLED = os.getenv("REMOTE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 REMOTE_BIND = os.getenv("REMOTE_BIND", "0.0.0.0:8787")
-MCP_REMOTE_TOKEN = os.getenv("MCP_REMOTE_TOKEN", "").strip()
 RATE_LIMIT_RPS = float(os.getenv("RATE_LIMIT_RPS", "10"))
 RATE_LIMIT_BURST = int(os.getenv("RATE_LIMIT_BURST", "20"))
+
+def _get_remote_token() -> str:
+    return os.getenv("MCP_REMOTE_TOKEN", "").strip()
 
 app = FastAPI(title="Enhanced LM Studio MCP Remote Server", version="1.0")
 
@@ -54,11 +56,12 @@ def _client_key(request: Request, authorization: Optional[str]) -> str:
     return request.client.host if request.client else "unknown"
 
 def _check_auth(authorization: Optional[str]):
-    if MCP_REMOTE_TOKEN:
+    token_env = _get_remote_token()
+    if token_env:
         if not authorization or not authorization.startswith("Bearer "):
             raise HTTPException(status_code=401, detail="Unauthorized: Missing Bearer token")
         token = authorization.split(" ", 1)[1]
-        if token != MCP_REMOTE_TOKEN:
+        if token != token_env:
             raise HTTPException(status_code=401, detail="Unauthorized: Invalid token")
 
 async def _rate_limit(request: Request, authorization: Optional[str]):
@@ -103,9 +106,10 @@ async def ws_endpoint(ws: WebSocket):
     # Auth during upgrade via query param 'token' or header 'Authorization' (if framework forwards it)
     token = ws.query_params.get("token")
     try:
-        if MCP_REMOTE_TOKEN:
+        token_env = _get_remote_token()
+        if token_env:
             if token:
-                if token != MCP_REMOTE_TOKEN:
+                if token != token_env:
                     await ws.close(code=4401)
                     return
             else:
