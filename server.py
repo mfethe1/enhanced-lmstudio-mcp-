@@ -984,6 +984,10 @@ def get_all_tools():
             {"name": "analyze_code_context", "description": "Deep code analysis with context awareness and semantic understanding", "inputSchema": {"type":"object","properties":{"code":{"type":"string"},"file_path":{"type":"string"},"analysis_type":{"type":"string","enum":["comprehensive","security","performance","maintainability"],"default":"comprehensive"}}, "required":["code"]}},
             {"name": "generate_tests_advanced", "description": "Generate comprehensive tests with edge cases and mocks", "inputSchema": {"type":"object","properties":{"code":{"type":"string"},"framework":{"type":"string","default":"pytest"},"test_types":{"type":"array","items":{"type":"string","enum":["unit","integration","e2e"]},"default":["unit"]},"include_mocks":{"type":"boolean","default":True}}, "required":["code"]}},
             {"name": "debug_interactive", "description": "Interactive debugging with breakpoint suggestions and issue analysis", "inputSchema": {"type":"object","properties":{"code":{"type":"string"},"error_message":{"type":"string"},"debug_type":{"type":"string","enum":["general","performance","logic","syntax"],"default":"general"}}}},
+            # Read-only code browsing tools
+            {"name": "list_directory", "description": "List files and directories under a path (read-only).", "inputSchema": {"type":"object","properties":{"path":{"type":"string","default":"."},"depth":{"type":"integer","default":1},"include_hidden":{"type":"boolean","default":False}}}},
+            {"name": "read_file_range", "description": "Read a specific line range from a file (1-based inclusive).", "inputSchema": {"type":"object","properties":{"file_path":{"type":"string"},"start_line":{"type":"integer"},"end_line":{"type":"integer"}}, "required":["file_path","start_line","end_line"]}},
+
 
             # Execution & Testing
             {"name": "execute_code", "description": "Execute code in a temp sandbox", "inputSchema": {"type":"object","properties":{"code":{"type":"string"},"language":{"type":"string","enum":["python","javascript","bash"],"default":"python"},"timeout":{"type":"integer","default":30}}, "required":["code"]}},
