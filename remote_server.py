@@ -5,7 +5,7 @@ import time
 from typing import Optional
 
 from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 import server as mcp_server
@@ -20,6 +20,13 @@ def _get_remote_token() -> str:
     return os.getenv("MCP_REMOTE_TOKEN", "").strip()
 
 app = FastAPI(title="Enhanced LM Studio MCP Remote Server", version="1.0")
+
+# Metrics endpoint (optional)
+try:
+    from observability.metrics import metrics_payload_bytes, CONTENT_TYPE_LATEST
+    _METRICS_ENABLED = True
+except Exception:
+    _METRICS_ENABLED = False
 
 # Basic CORS (can be tightened as needed)
 app.add_middleware(
@@ -97,6 +104,16 @@ async def rpc_endpoint(payload: dict, authorization: Optional[str] = Header(None
             "id": payload.get("id"),
             "error": {"code": -32603, "message": f"Tool execution error: {str(e)}"}
         }, status_code=500)
+
+@app.get("/metrics")
+async def metrics_endpoint():
+    if not _METRICS_ENABLED:
+        return Response(status_code=204)
+    try:
+        payload = metrics_payload_bytes()
+        return Response(content=payload, media_type=CONTENT_TYPE_LATEST)
+    except Exception:
+        return Response(status_code=500)
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):

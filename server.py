@@ -18,6 +18,7 @@ import time
 from typing import Any, Dict, List, Optional
 import aiohttp
 import logging
+from observability.metrics import record_backend_result, set_circuit_state, init_metrics, metrics_payload_bytes
 from pathlib import Path
 import ast
 import re
@@ -150,12 +151,18 @@ _http_client = RobustHTTPClient()
 class CircuitBreaker:
     """Circuit breaker pattern to prevent cascading failures"""
 
-    def __init__(self, failure_threshold: int = 5, recovery_timeout: float = 60.0):
+    def __init__(self, failure_threshold: int = 5, recovery_timeout: float = 60.0, name: str | None = None):
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
         self.failure_count = 0
         self.last_failure_time = 0
         self.state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
+        self.name = name
+        if self.name:
+            try:
+                set_circuit_state(self.name, self.state)
+            except Exception:
+                pass
 
     def can_execute(self) -> bool:
         """Check if operation can be executed"""
@@ -164,6 +171,11 @@ class CircuitBreaker:
         elif self.state == "OPEN":
             if time.time() - self.last_failure_time > self.recovery_timeout:
                 self.state = "HALF_OPEN"
+                if self.name:
+                    try:
+                        set_circuit_state(self.name, self.state)
+                    except Exception:
+                        pass
                 return True
             return False
         else:  # HALF_OPEN
@@ -173,6 +185,11 @@ class CircuitBreaker:
         """Record successful operation"""
         self.failure_count = 0
         self.state = "CLOSED"
+        if self.name:
+            try:
+                set_circuit_state(self.name, self.state)
+            except Exception:
+                pass
 
     def record_failure(self):
         """Record failed operation"""
@@ -182,6 +199,11 @@ class CircuitBreaker:
         if self.failure_count >= self.failure_threshold:
             self.state = "OPEN"
             logger.warning(f"Circuit breaker opened after {self.failure_count} failures")
+        if self.name:
+            try:
+                set_circuit_state(self.name, self.state)
+            except Exception:
+                pass
 
 # Global circuit breakers for different services
 _circuit_breakers = {
@@ -234,6 +256,11 @@ from proactive_research import ProactiveResearchOrchestrator
 # Configure logging
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger(__name__)
+# Initialize metrics early
+try:
+    init_metrics()
+except Exception:
+    pass
 # Singleton server instance (P1)
 _server_singleton: Optional["EnhancedLMStudioMCPServer"] = None
 
@@ -1047,30 +1074,24 @@ class EnhancedLMStudioMCPServer:
         return decorator
 
     async def make_llm_request(self, prompt: str, temperature: float = 0.35) -> str:
-        """Make request to LM Studio with enhanced error handling"""
+        """Make request to LM Studio using RobustHTTPClient with adaptive timeouts"""
         try:
-            import requests
-            response = requests.post(
+            operation_type = "complex" if len(prompt) > 2000 or "analyze" in prompt.lower() else "simple"
+            data = await self.http_client.post_async(
                 f"{self.base_url}/v1/chat/completions",
-                json={
+                json_data={
                     "model": self.model_name,
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": temperature,
                     "max_tokens": 4000
                 },
-                timeout=(60, 240),
-                headers={"Content-Type": "application/json"}
+                headers={"Content-Type": "application/json"},
+                operation_type=operation_type
             )
-
-            if response.status_code == 200:
-                result = response.json()
-                if "choices" in result and len(result["choices"]) > 0:
-                    return result["choices"][0]["message"]["content"]
-                else:
-                    return "Error: No response from model"
-            else:
-                return f"Error: HTTP {response.status_code} - {response.text}"
-
+            choices = data.get("choices") or []
+            if choices:
+                return choices[0].get("message", {}).get("content", "") or "Error: No response from model"
+            return "Error: No response from model"
         except Exception as e:
             logger.error(f"Error making LLM request: {e}")
             return f"Error: {str(e)}"
@@ -1573,15 +1594,16 @@ def handle_chat_with_tools(arguments, server):
         if top_p is not None:
             payload["top_p"] = float(top_p)
 
-        resp = requests.post(
-            f"{server.base_url}/v1/chat/completions",
-            json=payload,
-            timeout=(60, 240),
-            headers={"Content-Type": "application/json"}
-        )
-        if resp.status_code != 200:
-            return f"Error: HTTP {resp.status_code}: {resp.text[:200]}"
-        data = resp.json()
+        # Use centralized HTTP client (sync) for consistency and pooling
+        try:
+            data = _http_client.post_sync(
+                f"{server.base_url}/v1/chat/completions",
+                json_data=payload,
+                headers={"Content-Type": "application/json"},
+                operation_type="simple"
+            )
+        except Exception as e:
+            return f"Error: {str(e)[:200]}"
         choice = (data.get("choices") or [{}])[0]
         msg = choice.get("message", {})
         tool_calls = msg.get("tool_calls") or []
@@ -1829,27 +1851,22 @@ def handle_deep_research(arguments, server):
                 }
                 # Try versioned endpoint first, then unversioned for backward compatibility
                 urls_to_try = [f"{base_url}/v1/deep-research", f"{base_url}/deep-research"]
-                resp = None
+                fc = None
+                last_error = None
                 for url in urls_to_try:
                     try:
-                        r = requests.post(url, json=payload, headers=headers, timeout=(30, 240))
-                        # Prefer first success; if 404, try next URL
-                        if r.status_code == 404:
-                            resp = r
-                            continue
-                        resp = r
+                        fc = _http_client.post_sync(url, json_data=payload, headers=headers, operation_type="complex")
                         break
-                    except Exception as _:
-                        # Try next URL on transport errors
+                    except Exception as _e:
+                        last_error = str(_e)
                         continue
-                if resp is not None and 200 <= resp.status_code < 300:
-                    fc = resp.json()
+                if isinstance(fc, dict):
                     stage1 = {
-                        "final": (fc.get("data", {}) or {}).get("finalAnalysis") if isinstance(fc, dict) else None,
+                        "final": (fc.get("data", {}) or {}).get("finalAnalysis"),
                         "raw": fc,
                     }
                 else:
-                    msg = f"no response" if resp is None else f"HTTP {resp.status_code}: {resp.text[:200]}"
+                    msg = last_error or "no response"
                     stage1 = {
                         "final": None,
                         "raw": None,

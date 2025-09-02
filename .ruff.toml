@@ -1,0 +1,11 @@
+line-length = 120
+select = ["E","F","W","I","UP"]
+ignore = ["E501"]
+
+[per-file-ignores]
+# Allow tests to be a bit noisier
+"tests/*" = ["S101","SLF001"]
+
+[lint]
+extend-select = ["PL"]
+
