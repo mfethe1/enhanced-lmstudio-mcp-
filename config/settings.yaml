@@ -1,0 +1,22 @@
+backends:
+  lmstudio:
+    url: http://localhost:1234
+    default: true
+  openai:
+    enabled: false
+  anthropic:
+    enabled: false
+
+routing_rules:
+  - pattern: ".*"
+    backend: lmstudio
+    priority: 1
+
+performance:
+  cache:
+    enabled: true
+
+observability:
+  tracing:
+    enabled: true
+
