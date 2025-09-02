@@ -22,6 +22,9 @@ from pathlib import Path
 import ast
 import re
 from uuid import uuid4
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Enhanced modular components
 from enhanced_agent_teams import decide_backend_for_role as _enh_decide_backend_for_role  # delegate to enhanced module
@@ -51,6 +54,141 @@ def _spawn_thread(fn, *args, **kwargs):
         return t
     except Exception:
         return None
+
+# Enhanced HTTP Client with Connection Pooling and Robust Error Handling
+class RobustHTTPClient:
+    """HTTP client with connection pooling, retries, and adaptive timeouts"""
+
+    def __init__(self):
+        self.session = None
+        self.aio_session = None
+        self._setup_session()
+
+    def _setup_session(self):
+        """Setup requests session with connection pooling and retry strategy"""
+        self.session = requests.Session()
+
+        # Configure retry strategy
+        retry_strategy = Retry(
+            total=int(os.getenv("HTTP_MAX_RETRIES", "3")),
+            backoff_factor=float(os.getenv("HTTP_BACKOFF_FACTOR", "1.5")),
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET", "POST", "PUT", "DELETE", "OPTIONS", "TRACE"]
+        )
+
+        # Mount adapter with retry strategy
+        adapter = HTTPAdapter(
+            max_retries=retry_strategy,
+            pool_connections=10,
+            pool_maxsize=20
+        )
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
+
+    def get_timeout(self, operation_type: str = "simple") -> tuple:
+        """Get adaptive timeout based on operation complexity"""
+        connect_timeout = int(os.getenv("HTTP_CONNECT_TIMEOUT", "10"))
+
+        if operation_type == "complex":
+            read_timeout = int(os.getenv("HTTP_READ_TIMEOUT_COMPLEX", "180"))
+        else:
+            read_timeout = int(os.getenv("HTTP_READ_TIMEOUT_SIMPLE", "60"))
+
+        return (connect_timeout, read_timeout)
+
+    async def post_async(self, url: str, json_data: dict, headers: dict = None,
+                        operation_type: str = "simple") -> dict:
+        """Async POST request with proper error handling"""
+        if not self.aio_session:
+            timeout = aiohttp.ClientTimeout(
+                connect=int(os.getenv("HTTP_CONNECT_TIMEOUT", "10")),
+                total=int(os.getenv("HTTP_READ_TIMEOUT_SIMPLE", "60")) if operation_type == "simple"
+                      else int(os.getenv("HTTP_READ_TIMEOUT_COMPLEX", "180"))
+            )
+            self.aio_session = aiohttp.ClientSession(timeout=timeout)
+
+        try:
+            async with self.aio_session.post(url, json=json_data, headers=headers) as response:
+                if response.status == 200:
+                    return await response.json()
+                else:
+                    error_text = await response.text()
+                    raise Exception(f"HTTP {response.status}: {error_text[:200]}")
+        except asyncio.TimeoutError:
+            raise Exception(f"Request timeout for {operation_type} operation")
+        except Exception as e:
+            raise Exception(f"Request failed: {str(e)}")
+
+    def post_sync(self, url: str, json_data: dict, headers: dict = None,
+                  operation_type: str = "simple") -> dict:
+        """Synchronous POST request with proper error handling"""
+        timeout = self.get_timeout(operation_type)
+
+        try:
+            response = self.session.post(url, json=json_data, headers=headers, timeout=timeout)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                raise Exception(f"HTTP {response.status_code}: {response.text[:200]}")
+        except requests.exceptions.Timeout:
+            raise Exception(f"Request timeout for {operation_type} operation")
+        except Exception as e:
+            raise Exception(f"Request failed: {str(e)}")
+
+    async def cleanup(self):
+        """Cleanup resources"""
+        if self.aio_session:
+            await self.aio_session.close()
+            self.aio_session = None
+        if self.session:
+            self.session.close()
+
+# Global HTTP client instance
+_http_client = RobustHTTPClient()
+
+# Circuit Breaker for Enhanced Reliability
+class CircuitBreaker:
+    """Circuit breaker pattern to prevent cascading failures"""
+
+    def __init__(self, failure_threshold: int = 5, recovery_timeout: float = 60.0):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.failure_count = 0
+        self.last_failure_time = 0
+        self.state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
+
+    def can_execute(self) -> bool:
+        """Check if operation can be executed"""
+        if self.state == "CLOSED":
+            return True
+        elif self.state == "OPEN":
+            if time.time() - self.last_failure_time > self.recovery_timeout:
+                self.state = "HALF_OPEN"
+                return True
+            return False
+        else:  # HALF_OPEN
+            return True
+
+    def record_success(self):
+        """Record successful operation"""
+        self.failure_count = 0
+        self.state = "CLOSED"
+
+    def record_failure(self):
+        """Record failed operation"""
+        self.failure_count += 1
+        self.last_failure_time = time.time()
+
+        if self.failure_count >= self.failure_threshold:
+            self.state = "OPEN"
+            logger.warning(f"Circuit breaker opened after {self.failure_count} failures")
+
+# Global circuit breakers for different services
+_circuit_breakers = {
+    "lmstudio": CircuitBreaker(failure_threshold=3, recovery_timeout=30.0),
+    "openai": CircuitBreaker(failure_threshold=5, recovery_timeout=60.0),
+    "anthropic": CircuitBreaker(failure_threshold=5, recovery_timeout=60.0),
+}
 
 def _run_enhanced_plan_background(server, instruction: str, context: str, max_steps: int, task_id: str):
     """Background planner: ask router again with a generous timeout, validate steps, store results under task_id."""
@@ -470,6 +608,9 @@ class EnhancedLMStudioMCPServer:
         self.model_name = os.getenv("MODEL_NAME", "openai/gpt-oss-20b")
         self.working_directory = os.getcwd()
 
+        # Initialize enhanced HTTP client
+        self.http_client = _http_client
+
         # Initialize persistent storage: legacy facade wrapped by V2 selector when enabled
         self.storage = StorageSelector(_LegacyEnhanced())
         # Initialize robust router agent if available (after storage is ready)
@@ -479,6 +620,11 @@ class EnhancedLMStudioMCPServer:
             self._router_agent = None
         # Performance monitoring settings
         self.performance_threshold = float(os.getenv("PERFORMANCE_THRESHOLD", "0.2"))  # seconds
+
+        # Enhanced async management
+        self._event_loop = None
+        self._loop_thread = None
+        self._setup_async_management()
 
         # Modular registry and context manager (non-breaking initialization)
         try:
@@ -513,52 +659,133 @@ class EnhancedLMStudioMCPServer:
 
         # Router timing controls
         self._router_last_call = {"lmstudio": 0.0, "openai": 0.0, "anthropic": 0.0}
-        self._router_min_interval = 1.0 / float(os.getenv("ROUTER_RATE_LIMIT_TPS", "5"))
+        self._router_min_interval = 1.0 / float(os.getenv("ROUTER_RATE_LIMIT_TPS", "12"))
+
+    def _setup_async_management(self):
+        """Setup persistent event loop management to avoid resource leaks"""
+        try:
+            # Try to get existing event loop
+            self._event_loop = asyncio.get_event_loop()
+            if self._event_loop.is_closed():
+                self._event_loop = None
+        except RuntimeError:
+            self._event_loop = None
+
+        # Create new loop if needed
+        if self._event_loop is None:
+            self._event_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._event_loop)
+
+    def _get_or_create_loop(self):
+        """Get existing loop or create new one safely"""
+        try:
+            loop = asyncio.get_event_loop()
+            if not loop.is_closed():
+                return loop
+        except RuntimeError:
+            pass
+
+        # Create new loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop
+
+    async def _run_with_timeout(self, coro, timeout_seconds: float, operation_type: str = "simple"):
+        """Run coroutine with adaptive timeout and proper error handling"""
+        try:
+            return await asyncio.wait_for(coro, timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            raise Exception(f"Operation timed out after {timeout_seconds}s ({operation_type})")
+        except Exception as e:
+            raise Exception(f"Operation failed ({operation_type}): {str(e)}")
 
     async def _lmstudio_request_with_retry(self, prompt: str, temperature: float = 0.35, retries: int = 2, backoff: float = 0.5) -> str:
-        """Direct LM Studio request with simple retry/backoff (no routing)"""
-        import requests
+        """Direct LM Studio request with enhanced HTTP client, circuit breaker, and retry logic"""
+        circuit_breaker = _circuit_breakers["lmstudio"]
+
+        # Check circuit breaker
+        if not circuit_breaker.can_execute():
+            error_msg = "LM Studio circuit breaker is OPEN - service temporarily unavailable"
+            logger.warning(error_msg)
+            return f"Error: {error_msg}"
+
         attempt = 0
         last_err = None
+
+        # Determine operation complexity for timeout selection
+        operation_type = "complex" if len(prompt) > 2000 or "plan" in prompt.lower() or "analyze" in prompt.lower() else "simple"
+
         while attempt <= retries:
             try:
-                response = requests.post(
+                # Use enhanced HTTP client
+                response_data = await self.http_client.post_async(
                     f"{self.base_url}/v1/chat/completions",
-                    json={
+                    json_data={
                         "model": self.model_name,
                         "messages": [{"role": "user", "content": prompt}],
                         "temperature": temperature,
                         "max_tokens": 4000
                     },
-                    timeout=(60, 240),
-                    headers={"Content-Type": "application/json"}
+                    headers={"Content-Type": "application/json"},
+                    operation_type=operation_type
                 )
-                if response.status_code == 200:
-                    result = response.json()
-                    if "choices" in result and result["choices"]:
-                        content = result["choices"][0]["message"].get("content", "")
+
+                if "choices" in response_data and response_data["choices"]:
+                    content = response_data["choices"][0]["message"].get("content", "")
+                    if content.strip():
+                        circuit_breaker.record_success()
                         return _sanitize_llm_output(content)
-                    return "Error: No response from model"
-                last_err = f"HTTP {response.status_code}: {response.text[:200]}"
+                    else:
+                        last_err = "Empty response from model"
+                else:
+                    last_err = "No choices in response"
+
             except Exception as e:
                 last_err = str(e)
-            attempt += 1
-            await asyncio.sleep(backoff * attempt)
-        return f"Error: LLM request failed after {retries+1} attempts: {last_err}"
+                logger.warning(f"LM Studio request attempt {attempt + 1} failed: {last_err}")
 
-    async def make_llm_request_with_retry(self, prompt: str, temperature: float = 0.35, retries: int = 2, backoff: float = 0.5) -> str:
-        """Centralized LLM request; optionally routes across providers if enabled."""
+            attempt += 1
+            if attempt <= retries:
+                await asyncio.sleep(backoff * attempt)
+
+        # Record failure in circuit breaker
+        circuit_breaker.record_failure()
+        error_msg = f"LLM request failed after {retries+1} attempts: {last_err}"
+        logger.error(error_msg)
+        return f"Error: {error_msg}"
+
+    async def make_llm_request_with_retry(self, prompt: str, temperature: float = 0.35, retries: int = 2, backoff: float = 0.5,
+                                         intent: str = None, role: str = None) -> str:
+        """Centralized LLM request with enhanced routing and error handling"""
+        # Determine operation complexity for timeout management
+        operation_type = "complex" if len(prompt) > 2000 or any(keyword in prompt.lower()
+                                                               for keyword in ["plan", "analyze", "research", "deep"]) else "simple"
+
+        # Use router if enabled and available
         if os.getenv("ROUTER_WRAP_MLR", "1").lower() in {"1","true","yes","on"}:
-            return await self.route_chat(prompt, temperature=temperature)
+            try:
+                # Set adaptive timeout based on operation type
+                timeout_seconds = float(os.getenv("HTTP_READ_TIMEOUT_COMPLEX", "180")) if operation_type == "complex" else float(os.getenv("HTTP_READ_TIMEOUT_SIMPLE", "60"))
+
+                return await self._run_with_timeout(
+                    self.route_chat(prompt, temperature=temperature, intent=intent, role=role),
+                    timeout_seconds,
+                    operation_type
+                )
+            except Exception as e:
+                logger.warning(f"Router failed, falling back to direct LM Studio: {e}")
+
+        # Fallback to direct LM Studio request
         return await self._lmstudio_request_with_retry(prompt, temperature=temperature, retries=retries, backoff=backoff)
 
 
-    def _router_wait(self, backend: str):
+    async def _router_wait(self, backend: str):
+        """Async rate limiting to avoid blocking the event loop"""
         now = time.time()
         last = self._router_last_call.get(backend, 0.0)
         gap = now - last
         if gap < self._router_min_interval:
-            time.sleep(self._router_min_interval - gap)
+            await asyncio.sleep(self._router_min_interval - gap)
         self._router_last_call[backend] = time.time()
 
 
@@ -688,32 +915,33 @@ class EnhancedLMStudioMCPServer:
         t0 = time.time()
         try:
             if backend == "openai" and os.getenv("OPENAI_API_KEY"):
-                self._router_wait("openai")
-                import requests
+                await self._router_wait("openai")
                 base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
                 model = (model_override or os.getenv("OPENAI_MODEL", "gpt-5"))
                 # normalize common aliases
                 if model in {"gpt5", "gpt-5-full"}:
                     model = "gpt-5"
                 decision["model"] = model
-                r = requests.post(
-                    f"{base}/chat/completions",
-                    headers={"Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}", "Content-Type": "application/json"},
-                    json={"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": temperature, "max_tokens": max_tokens},
-                    timeout=(60, 240)
-                )
-                if r.status_code == 200:
-                    data = r.json()
-                    out = _sanitize_llm_output(data.get("choices", [{}])[0].get("message", {}).get("content", ""))
+
+                # Use enhanced HTTP client with adaptive timeout
+                operation_type = "complex" if len(prompt) > 2000 else "simple"
+                try:
+                    response_data = await self.http_client.post_async(
+                        f"{base}/chat/completions",
+                        json_data={"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": temperature, "max_tokens": max_tokens},
+                        headers={"Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}", "Content-Type": "application/json"},
+                        operation_type=operation_type
+                    )
+                    out = _sanitize_llm_output(response_data.get("choices", [{}])[0].get("message", {}).get("content", ""))
                     decision.update({"latency_ms": int((time.time()-t0)*1000), "success": True})
                     self._router_log.append(decision); self._router_log[:] = self._router_log[-200:]
                     return out
-                logger.warning("OpenAI error %s: %s", r.status_code, r.text[:200])
-                decision.update({"latency_ms": int((time.time()-t0)*1000), "success": False, "error": f"http {r.status_code}"})
-                self._router_log.append(decision); self._router_log[:] = self._router_log[-200:]
+                except Exception as e:
+                    logger.warning("OpenAI error: %s", str(e)[:200])
+                    decision.update({"latency_ms": int((time.time()-t0)*1000), "success": False, "error": str(e)[:100]})
+                    self._router_log.append(decision); self._router_log[:] = self._router_log[-200:]
             if backend == "anthropic" and os.getenv("ANTHROPIC_API_KEY"):
-                self._router_wait("anthropic")
-                import requests
+                await self._router_wait("anthropic")
                 base = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1")
                 default_model = (model_override or os.getenv("ANTHROPIC_MODEL", "claude-4-sonnet"))
                 agent_conf = None
@@ -723,29 +951,32 @@ class EnhancedLMStudioMCPServer:
                     pass
                 model = _select_anthropic_model(role, intent, complexity, prompt, agent_conf, default_model) if not model_override else default_model
                 decision["model"] = model
-                r = requests.post(
-                    f"{base}/messages",
-                    headers={
-                        "x-api-key": os.getenv("ANTHROPIC_API_KEY"),
-                        "anthropic-version": os.getenv("ANTHROPIC_VERSION", "2023-06-01"),
-                        "content-type": "application/json",
-                    },
-                    json={"model": model, "max_tokens": max_tokens, "temperature": temperature, "messages": [{"role": "user", "content": prompt}]},
-                    timeout=(60, 240)
-                )
-                if r.status_code == 200:
-                    data = r.json()
-                    parts = data.get("content", [])
+
+                # Use enhanced HTTP client with adaptive timeout
+                operation_type = "complex" if len(prompt) > 2000 else "simple"
+                try:
+                    response_data = await self.http_client.post_async(
+                        f"{base}/messages",
+                        json_data={"model": model, "max_tokens": max_tokens, "temperature": temperature, "messages": [{"role": "user", "content": prompt}]},
+                        headers={
+                            "x-api-key": os.getenv("ANTHROPIC_API_KEY"),
+                            "anthropic-version": os.getenv("ANTHROPIC_VERSION", "2023-06-01"),
+                            "content-type": "application/json",
+                        },
+                        operation_type=operation_type
+                    )
+                    parts = response_data.get("content", [])
                     txt = "".join([p.get("text", "") for p in parts if isinstance(p, dict)])
                     out = _sanitize_llm_output(txt)
                     decision.update({"latency_ms": int((time.time()-t0)*1000), "success": True})
                     self._router_log.append(decision); self._router_log[:] = self._router_log[-200:]
                     return out
-                logger.warning("Anthropic error %s: %s", r.status_code, r.text[:200])
-                decision.update({"latency_ms": int((time.time()-t0)*1000), "success": False, "error": f"http {r.status_code}"})
-                self._router_log.append(decision); self._router_log[:] = self._router_log[-200:]
+                except Exception as e:
+                    logger.warning("Anthropic error: %s", str(e)[:200])
+                    decision.update({"latency_ms": int((time.time()-t0)*1000), "success": False, "error": str(e)[:100]})
+                    self._router_log.append(decision); self._router_log[:] = self._router_log[-200:]
             # Default LM Studio
-            self._router_wait("lmstudio")
+            await self._router_wait("lmstudio")
             out = await self._lmstudio_request_with_retry(prompt, temperature=temperature)
             decision.update({"model": self.model_name, "latency_ms": int((time.time()-t0)*1000), "success": True})
             self._router_log.append(decision); self._router_log[:] = self._router_log[-200:]
@@ -756,7 +987,7 @@ class EnhancedLMStudioMCPServer:
             self._router_log.append(decision); self._router_log[:] = self._router_log[-200:]
             # Fallback chain
             try:
-                self._router_wait("lmstudio")
+                await self._router_wait("lmstudio")
                 out = await self._lmstudio_request_with_retry(prompt, temperature=temperature)
                 return out
             except Exception as e2:
