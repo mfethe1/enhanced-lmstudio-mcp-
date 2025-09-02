@@ -12,6 +12,7 @@ def _call(name, args):
 
 def test_audit_and_workflow_smoke(monkeypatch):
     monkeypatch.setenv('ALLOWED_BASE_DIR', os.getcwd())
+    monkeypatch.setenv('EXPOSE_PUBLIC_ONLY', '0')  # expose full toolset for tests
     # tools list contains our new tools
     tools = s.handle_message({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'})['result']['tools']
     names = {t['name'] for t in tools}

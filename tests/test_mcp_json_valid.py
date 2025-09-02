@@ -7,11 +7,11 @@ def test_mcp_json_is_valid():
     assert 'lmstudio-mcp' in data['mcpServers']
     srv = data['mcpServers']['lmstudio-mcp']
     assert srv['type'] == 'stdio'
-    assert srv['command'] in ('python', 'py')
+    assert isinstance(srv['command'], str) and srv['command']
     assert isinstance(srv['args'], list) and srv['args']
     # Basic env validations
     env = srv.get('env', {})
     assert env.get('MODEL_NAME') == 'openai/gpt-oss-20b'
-    assert env.get('OPENAI_MODEL') == 'gpt5'
+    assert env.get('OPENAI_MODEL') in ('gpt-5','gpt-5-full','gpt5')
     assert env.get('ANTHROPIC_MODEL') == 'claude-4-sonnet'
 

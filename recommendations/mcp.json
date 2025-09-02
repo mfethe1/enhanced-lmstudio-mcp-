@@ -2,15 +2,32 @@
   "mcpServers": {
     "lmstudio-mcp": {
       "type": "stdio",
-      "command": "python",
-      "args": ["-u", "C:/Users/mfeth/.mcp-servers/lmstudio-mcp/server.py"],
+      "command": "py",
+      "args": ["-3", "-u", "C:/Users/mfeth/.mcp-servers/lmstudio-mcp/server.py"],
       "env": {
         "ALLOWED_BASE_DIR": "C:\\Users\\mfeth\\.mcp-servers\\lmstudio-mcp",
         "LM_STUDIO_URL": "http://localhost:1234",
+        "LMSTUDIO_API_BASE": "http://localhost:1234/v1",
         "MODEL_NAME": "openai/gpt-oss-20b",
+        "LMSTUDIO_MODEL": "openai/gpt-oss-20b",
         "ENHANCED_STORAGE": "1",
         "PYTHONUNBUFFERED": "1",
-        "OPENAI_MODEL": "gpt5",
+        "EXPOSE_PUBLIC_ONLY": "1",
+        "PROTOCOL_VERSION": "2025-06-18",
+
+        "ROUTER_USE_AGENT": "1",
+        "ROUTER_RATE_LIMIT_TPS": "5",
+        "SMART_TASK_MAX_REFINES": "5",
+        "SMART_PLAN_IMMEDIATE_TIMEOUT_SEC": "75",
+        "ROUTER_BG_TIMEOUT_SEC": "240",
+
+        "LMSTUDIO_FUNCTION_MODEL": "bytedance/seed-oss-36b",
+        "TOOLCALL_DEFAULT_TEMPERATURE": "0.15",
+        "TOOLCALL_TOOL_CHOICE_DEFAULT": "required",
+
+        "FIRECRAWL_API_KEY": "fc-f92b91574b974067bbad65338effddc5",
+
+        "OPENAI_MODEL": "gpt-5",
         "OPENAI_BASE_URL": "https://api.openai.com/v1",
         "ANTHROPIC_MODEL": "claude-4-sonnet",
         "ANTHROPIC_BASE_URL": "https://api.anthropic.com/v1",
