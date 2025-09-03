@@ -248,6 +248,32 @@ def _run_enhanced_plan_background(server, instruction: str, context: str, max_st
 
 
 # Import enhanced storage facade (selects SQLite/Postgres per env)
+import inspect
+
+def _maybe_call_sync(func, *args, **kwargs) -> bool:
+    """Call a function that may return a coroutine; if so, run it safely.
+    Returns True if call succeeded (scheduled or completed), False otherwise.
+    """
+    try:
+        res = func(*args, **kwargs)
+        if inspect.iscoroutine(res):
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.create_task(res)
+                else:
+                    loop.run_until_complete(res)
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                try:
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(res)
+                finally:
+                    loop.close()
+        return True
+    except Exception:
+        return False
+
 from enhanced_mcp_storage import EnhancedMCPStorage as _LegacyEnhanced
 from enhanced_mcp_storage_v2 import StorageSelector
 
@@ -273,7 +299,7 @@ try:
             try:
                 s = get_server_singleton()
                 if s:
-                    _opt_integ(s)
+                    _maybe_call_sync(_opt_integ, s)
             except Exception:
                 pass
         try:
@@ -826,7 +852,7 @@ class EnhancedLMStudioMCPServer:
         return f"Error: {error_msg}"
 
     async def make_llm_request_with_retry(self, prompt: str, temperature: float = 0.35, retries: int = 2, backoff: float = 0.5,
-                                         intent: str = None, role: str = None) -> str:
+                                         intent: Optional[str] = None, role: Optional[str] = None) -> str:
         """Centralized LLM request with enhanced routing and error handling"""
         # Determine operation complexity for timeout management
         operation_type = "complex" if len(prompt) > 2000 or any(keyword in prompt.lower()
@@ -4343,7 +4369,7 @@ def handle_agent_team_plan_and_code(arguments, server):
 # Validation engine integration (wraps review & TDD flows)
 try:
     from validation_engine import integrate_with_agent_review_and_tdd as _integrate_validation
-    _integrate_validation(get_server_singleton())
+    _maybe_call_sync(_integrate_validation, get_server_singleton())
 except Exception:
     pass
 
