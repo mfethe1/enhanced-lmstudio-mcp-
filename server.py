@@ -4156,14 +4156,10 @@ def handle_cognitive_orchestrate(arguments, server):
     try:
         from cognitive_architecture.orchestrator import orchestrate_task
         data = orchestrate_task(get_server_singleton(), task, constraints, initial_code, strategy, max_iter)
-        # Keep output small and JSON-serializable for downstream tests
-        slim = {
-            "plan": data.get("plan", {}),
-            "agents": data.get("agents", []),
-            "artifacts": {"files": list((data.get("artifacts", {}).get("files") or {}).keys()),
-                           "tests": list((data.get("artifacts", {}).get("tests") or {}).keys())},
-        }
-        return json.dumps(slim)
+        # Return actual artifacts since tests expect dicts for files/tests
+        if isinstance(data, dict) and isinstance(data.get("artifacts"), dict):
+            return json.dumps(data)
+        return json.dumps({"error": "unexpected orchestrate_task return"})
     except Exception as e:
         return {"error": str(e)}
 
