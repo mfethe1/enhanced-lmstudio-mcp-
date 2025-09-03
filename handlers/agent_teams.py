@@ -59,8 +59,9 @@ def handle_agent_team_plan_and_code(arguments: Dict[str, Any], server) -> str:
     try:
         if os.getenv("AGENT_TEAM_FORCE_FALLBACK") == "1":
             raise RuntimeError("forced_fallback")
-        from crewai import Agent, Crew, Task  # type: ignore
-        base_kwargs = {"allow_delegation": False, "verbose": False}
+        from server import _import_crewai_any
+        Agent, Crew, Task = _import_crewai_any()
+        base_kwargs: dict[str, object] = {"allow_delegation": False, "verbose": False}
         # Per-role LLMs via router-aware helper
         planner_llm = _agent_llm_for_role("Planner")
         coder_llm = _agent_llm_for_role("Coder")
@@ -116,8 +117,9 @@ def handle_agent_team_review_and_test(arguments: Dict[str, Any], server) -> str:
     test_command = (arguments.get("test_command") or "pytest")
 
     try:
-        from crewai import Agent, Crew, Task  # type: ignore
-        base_kwargs = {"allow_delegation": False, "verbose": False}
+        from server import _import_crewai_any
+        Agent, Crew, Task = _import_crewai_any()
+        base_kwargs: dict[str, object] = {"allow_delegation": False, "verbose": False}
         reviewer_llm = _agent_llm_for_role("Reviewer")
         qa_llm = _agent_llm_for_role("QA")
         if reviewer_llm: base_kwargs_reviewer = {**base_kwargs, "llm": reviewer_llm}

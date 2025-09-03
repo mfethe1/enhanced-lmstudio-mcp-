@@ -613,6 +613,22 @@ def _build_sequential_thinking_prompt(
 _DEF_TEST_CMD = os.getenv("TEST_COMMAND", "pytest -q")
 
 
+# Helper: import CrewAI classes but cast to Any to avoid brittle typing conflicts across versions
+from typing import Any as _Any, cast as _cast
+
+def _import_crewai_any():
+    try:
+        from crewai import Agent as _Agent, Crew as _Crew, Task as _Task  # type: ignore
+    except Exception:
+        try:
+            # Older module paths
+            from crewai import Agent as _Agent  # type: ignore
+            from crewai import Crew as _Crew  # type: ignore
+            from crewai import Task as _Task  # type: ignore
+        except Exception as e:
+            raise e
+    return _cast(_Any, _Agent), _cast(_Any, _Crew), _cast(_Any, _Task)
+
 # Safety and validation helpers (P0)
 class ValidationError(Exception):
     """Raised for invalid user inputs or disallowed operations."""
@@ -1946,7 +1962,7 @@ def handle_deep_research(arguments, server):
 
     # Stage 2: CrewAI multi-agent synthesis (optional; best-effort)
     try:
-        from crewai import Agent, Crew, Task
+        Agent, Crew, Task = _import_crewai_any()
         # Try to hardwire CrewAI to LM Studio's OpenAI-compatible endpoint and model
         llm = None
         try:
@@ -4078,10 +4094,10 @@ def handle_propose_research(arguments, server):
 
 def _create_agent(role: str, goal: str, backstory: str, task_desc: str):
     try:
-        from crewai import Agent  # type: ignore
+        Agent, _, _ = _import_crewai_any()
         backend = _decide_backend_for_role(role, task_desc)
         llm = _build_llm_for_backend(backend)
-        kwargs = {"allow_delegation": False, "verbose": False}
+        kwargs: dict[str, object] = {"allow_delegation": False, "verbose": False}
         if llm is not None:
             kwargs["llm"] = llm
         logger.info("Creating agent '%s' -> backend=%s model=%s", role, backend, getattr(llm, 'model', 'n/a'))
@@ -4094,9 +4110,9 @@ def _create_agent(role: str, goal: str, backstory: str, task_desc: str):
 
 def _select_experts(task_desc: str):
     try:
-        from crewai import Agent  # type: ignore
+        Agent, _, _ = _import_crewai_any()
         llm = _make_crewai_llm()
-        base_kwargs = {"allow_delegation": False, "verbose": False}
+        base_kwargs: dict[str, object] = {"allow_delegation": False, "verbose": False}
         if llm is not None:
             base_kwargs["llm"] = llm
         desc = (task_desc or "").lower()
@@ -4226,9 +4242,9 @@ def handle_agent_team_plan_and_code(arguments, server):
         # Allow tests or offline mode to force fallback
         if os.getenv("AGENT_TEAM_FORCE_FALLBACK") == "1":
             raise RuntimeError("forced_fallback")
-        from crewai import Agent, Crew, Task
+        Agent, Crew, Task = _import_crewai_any()
         llm = _make_crewai_llm()
-        base_kwargs = {"allow_delegation": False, "verbose": False}
+        base_kwargs: dict[str, object] = {"allow_delegation": False, "verbose": False}
         if llm is not None:
             base_kwargs["llm"] = llm
 
@@ -4273,7 +4289,7 @@ def handle_agent_team_plan_and_code(arguments, server):
                 auto_research_rounds = max(0, auto_research_rounds - 1)
                 # Minimal second pass prompt that includes research results
                 try:
-                    from crewai import Task
+                    _, Crew, Task = _import_crewai_any()
                     t_refine = Task(description=(
                         "Refine plan and code suggestions using the new research results. "
                         "If patches changed, output updated fenced code blocks.\n\n"
@@ -4338,10 +4354,9 @@ def handle_agent_team_review_and_test(arguments, server):
         Crew = globals().get("Crew")
         Task = globals().get("Task")
         if not (Agent and Crew and Task):
-            from crewai import Agent as _CAAgent, Crew as _CACrew, Task as _CATask
-            Agent, Crew, Task = _CAAgent, _CACrew, _CATask
+            Agent, Crew, Task = _import_crewai_any()
         llm = _make_crewai_llm()
-        base_kwargs = {"allow_delegation": False, "verbose": False}
+        base_kwargs: dict[str, object] = {"allow_delegation": False, "verbose": False}
         if llm is not None:
             base_kwargs["llm"] = llm
         reviewer = Agent(role="Reviewer", goal="Assess diff for correctness/risk and request fixes.", backstory="Thorough code reviewer.", **base_kwargs)
@@ -4410,7 +4425,7 @@ def handle_agent_team_refactor(arguments, server):
     try:
         from crewai import Agent, Crew, Task
         llm = _make_crewai_llm()
-        base_kwargs = {"allow_delegation": False, "verbose": False}
+        base_kwargs: dict[str, object] = {"allow_delegation": False, "verbose": False}
         if llm is not None:
             base_kwargs["llm"] = llm
         refactorer = Agent(role="Refactorer", goal="Propose clearer, modular refactor with docstrings.", backstory="Engineer focused on readability and maintainability.", **base_kwargs)
