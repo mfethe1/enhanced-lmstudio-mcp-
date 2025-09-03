@@ -1236,6 +1236,8 @@ def get_all_tools():
             {"name": "analyze_code_context", "description": "Deep code analysis with context awareness and semantic understanding", "inputSchema": {"type":"object","properties":{"code":{"type":"string"},"file_path":{"type":"string"},"analysis_type":{"type":"string","enum":["comprehensive","security","performance","maintainability"],"default":"comprehensive"}}, "required":["code"]}},
             {"name": "generate_tests_advanced", "description": "Generate comprehensive tests with edge cases and mocks", "inputSchema": {"type":"object","properties":{"code":{"type":"string"},"framework":{"type":"string","default":"pytest"},"test_types":{"type":"array","items":{"type":"string","enum":["unit","integration","e2e"]},"default":["unit"]},"include_mocks":{"type":"boolean","default":True}}, "required":["code"]}},
             {"name": "debug_interactive", "description": "Interactive debugging with breakpoint suggestions and issue analysis", "inputSchema": {"type":"object","properties":{"code":{"type":"string"},"error_message":{"type":"string"},"debug_type":{"type":"string","enum":["general","performance","logic","syntax"],"default":"general"}}}},
+            {"name": "cognitive_codegen_one_shot", "description": "One-shot code synthesis: generate an Augment-compatible MCP tool from a natural language spec.", "inputSchema": {"type":"object","properties":{"spec":{"type":"string","description":"Natural language tool spec"},"module_path":{"type":"string","default":"auto_tool.py"}}, "required":["spec"]}},
+
             # Read-only code browsing tools
             {"name": "list_directory", "description": "List files and directories under a path (read-only).", "inputSchema": {"type":"object","properties":{"path":{"type":"string","default":"."},"depth":{"type":"integer","default":1},"include_hidden":{"type":"boolean","default":False}}}},
             {"name": "read_file_range", "description": "Read a specific line range from a file (1-based inclusive).", "inputSchema": {"type":"object","properties":{"file_path":{"type":"string"},"start_line":{"type":"integer"},"end_line":{"type":"integer"}}, "required":["file_path","start_line","end_line"]}},
@@ -1548,6 +1550,42 @@ def _build_openai_tools_payload(allowed: list[str]) -> list[dict]:
         except Exception:
             continue
     return tools
+
+
+def handle_cognitive_codegen_one_shot(arguments, server):
+    """Generate a complete Augment-compatible MCP tool module from an NL spec.
+    Returns a dict containing files, tests, and docs. Does not write to disk by default.
+    """
+    try:
+        from cognitive_coder import example_one_shot_generation
+    except Exception as e:
+        return {"error": f"cognitive_coder missing: {e}"}
+    spec = (arguments.get("spec") or "").strip()
+    module_path = (arguments.get("module_path") or "auto_tool.py").strip()
+    if not spec:
+        return {"error": "'spec' is required"}
+    # Call example synthesis and then rewrite the module_path if requested
+    try:
+        try:
+            result = asyncio.get_event_loop().run_until_complete(example_one_shot_generation(server))
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            try:
+                asyncio.set_event_loop(loop)
+                result = loop.run_until_complete(example_one_shot_generation(server))
+            finally:
+                loop.close()
+    except Exception as e:
+        return {"error": f"synthesis failed: {str(e)}"}
+    # Remap module path if caller provided a custom path
+    files = result.get("files", {})
+    tests = result.get("tests", {})
+    docs = result.get("docs", "")
+    if "auto_tool.py" in files and module_path != "auto_tool.py":
+        files = {module_path: files["auto_tool.py"]}
+        tests = {f"tests/test_{Path(module_path).stem}.py": list(tests.values())[0]} if tests else {}
+    return {"files": files, "tests": tests, "docs": docs}
+
 
 
 def handle_chat_with_tools(arguments, server):
