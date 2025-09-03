@@ -2144,6 +2144,7 @@ def handle_tool_call(message):
             "import_graph": (handle_import_graph, True),
             "file_scaffold": (handle_file_scaffold, True),
             "mcts_plan_solution": (handle_mcts_plan_solution, True),
+            "cognitive_orchestrate": (handle_cognitive_orchestrate, True),
 
             # Optional debugging and thinking tools (available but not advertised in minimal surface)
             "sequential_thinking": (handle_sequential_thinking, True),
@@ -4122,6 +4123,23 @@ def _read_files_for_context(paths: list[str]) -> str:
         except Exception:
             continue
     return _compact_text("\n\n".join(parts), max_chars=4000)
+
+def handle_cognitive_orchestrate(arguments, server):
+    """Meta-orchestration: plan with MCTS, spawn agents, leverage knowledge graph, synthesize code, validate.
+    arguments: { task: str, constraints?: dict, initial_code?: str, strategy?: str, max_iterations?: int }
+    """
+    task = (arguments.get("task") or "").strip()
+    if not task:
+        return {"error": "'task' is required"}
+    constraints = arguments.get("constraints") or {}
+    initial_code = arguments.get("initial_code") or ""
+    strategy = (arguments.get("strategy") or "hierarchical").strip().lower()
+    max_iter = int(arguments.get("max_iterations", 400))
+    try:
+        from cognitive_architecture.orchestrator import orchestrate_task
+        return orchestrate_task(get_server_singleton(), task, constraints, initial_code, strategy, max_iter)
+    except Exception as e:
+        return {"error": str(e)}
 
 def handle_mcts_plan_solution(arguments, server):
     """Plan code generation steps using MCTS.
