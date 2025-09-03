@@ -634,20 +634,28 @@ class ValidationError(Exception):
     """Raised for invalid user inputs or disallowed operations."""
     pass
 
-# Allowed base directory for all filesystem operations
-_BASE_DIR = Path(os.getenv("ALLOWED_BASE_DIR", os.getcwd())).resolve()
+# Allowed base directory for all filesystem operations (dynamic)
+
+def _get_base_dir() -> Path:
+    return Path(os.getenv("ALLOWED_BASE_DIR", os.getcwd())).resolve()
+
+# Backward-compat constant (not used in new code paths)
+_BASE_DIR = _get_base_dir()
 
 # Firecrawl configuration: do not embed secrets; require FIRECRAWL_API_KEY via environment
 FIRECRAWL_BASE_URL_STATIC = "https://api.firecrawl.dev"
 
 
 def _safe_path(p: str) -> Path:
-    """Return a resolved path if and only if it is inside the allowed base dir."""
+    """Return a resolved path if and only if it is inside the allowed base dir.
+    Uses dynamic base directory to respect current working directory in tests unless ALLOWED_BASE_DIR is set.
+    """
     if not p or not isinstance(p, str):
         raise ValidationError("file_path must be a non-empty string")
     rp = Path(p).resolve()
+    base = _get_base_dir()
     try:
-        rp.relative_to(_BASE_DIR)
+        rp.relative_to(base)
     except Exception:
         raise ValidationError("Path outside allowed base directory")
     return rp
@@ -4172,9 +4180,10 @@ def handle_cognitive_orchestrate(arguments, server):
     try:
         from cognitive_architecture.orchestrator import orchestrate_task
         data = orchestrate_task(get_server_singleton(), task, constraints, initial_code, strategy, max_iter)
-        # Return actual artifacts since tests expect dicts for files/tests
+        # Return artifacts/plan/agents; drop or stringify non-serializable fields
         if isinstance(data, dict) and isinstance(data.get("artifacts"), dict):
-            return json.dumps(data)
+            safe = {k: v for k, v in data.items() if k != "validation"}
+            return json.dumps(safe, ensure_ascii=False, default=lambda o: getattr(o, "__dict__", str(o)))
         return json.dumps({"error": "unexpected orchestrate_task return"})
     except Exception as e:
         return {"error": str(e)}
