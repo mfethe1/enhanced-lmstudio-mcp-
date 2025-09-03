@@ -52,20 +52,28 @@ def _derive_required_caps(actions: List[str]) -> List[AgentCapability]:
 async def orchestrate_task_async(server: Any, task: str, constraints: Optional[Dict[str, Any]] = None, initial_code: str = "", strategy: str = "hierarchical", max_iterations: int = 400) -> Dict[str, Any]:
     constraints = constraints or {}
 
+    prod = getattr(server, "production", None)
+    trace = getattr(prod, "trace", None)
+
     # 1) Knowledge context
+    span = trace.start_span("orchestrate_kg") if trace else None
     kg = CodeKnowledgeGraph(server.storage)
     ctx_items = kg.get_context_for_generation(task, max_context_items=5)
+    if trace:
+        trace.end_span(span, status="ok")
+
     # Include context in shaped prompt if optimizer is present
     context_snippets = []
     for item in ctx_items:
         if item.get("code"):
             context_snippets.append(item["code"][:400])
-    if getattr(server, "production", None) is not None:
-        shaped_task = server.production.augment.shape_prompt(task, context_snippets)
+    if prod is not None:
+        shaped_task = prod.augment.shape_prompt(task, context_snippets)
     else:
         shaped_task = task + ("\n\n" + "\n\n".join(context_snippets) if context_snippets else "")
 
     # 2) MCTS planning with bias: override initial actions to include pattern-driven actions
+    span = trace.start_span("orchestrate_mcts_plan") if trace else None
     planner = MCTSCodePlanner(server, max_iterations=max_iterations)
     base_get_init = planner._get_initial_actions
 
@@ -80,10 +88,12 @@ async def orchestrate_task_async(server: Any, task: str, constraints: Optional[D
         return list(dict.fromkeys(acts))
 
     planner._get_initial_actions = _biased_initial_actions  # type: ignore
-
     plan = await planner.plan_solution(shaped_task, constraints, initial_code)
+    if trace:
+        trace.end_span(span, status="ok")
 
     # 3) Spawn agents based on plan
+    span = trace.start_span("orchestrate_spawn_agents") if trace else None
     spawner = get_spawner(server)
     required_caps = _derive_required_caps(plan.get("action_sequence", []))
     # Use spawner capability analysis too
@@ -94,26 +104,38 @@ async def orchestrate_task_async(server: Any, task: str, constraints: Optional[D
     for i in range(max(2, min(5, len(req_set) or 2))):
         ag = await spawner.spawn_or_retrieve_agent(req_set, task_id=f"{task[:24]}_{i}")
         agents.append(ag)
+    if trace:
+        trace.end_span(span, status="ok")
 
     # 4) Execute agents to synthesize guidance/partial outputs
+    span = trace.start_span("orchestrate_agent_execute") if trace else None
     agent_exec = await spawner.execute_with_agents(task, agents, coordination_strategy=strategy)
+    if trace:
+        trace.end_span(span, status="ok")
 
     # 5) One-shot code synthesis
+    span = trace.start_span("orchestrate_synthesis") if trace else None
     artifacts = {"files": {}, "tests": {}, "docs": ""}
     if OneShotCognitiveCoder is not None:
         coder = OneShotCognitiveCoder(server, getattr(server, "storage", None))
         spec = f"{task}\n\nPlan: {json.dumps(plan)}\n\nContext: {'; '.join(context_snippets[:3])}"
         synth = await coder.synthesize(specification=spec, module_path="auto_tool.py")
         artifacts = {"files": synth.code_files, "tests": synth.test_files, "docs": synth.docs}
+    if trace:
+        trace.end_span(span, status="ok")
 
     # 6) Validation
+    span = trace.start_span("orchestrate_validation") if trace else None
     validation_report = None
     if ContinuousValidationLoop is not None:
         loop = ContinuousValidationLoop(server)
         changed_paths = list(artifacts.get("files", {}).keys()) + list(artifacts.get("tests", {}).keys())
         validation_report = loop.run_full_validation(changed_paths) if changed_paths else loop.realtime_validate_snippet("# no files")
+    if trace:
+        trace.end_span(span, status="ok")
 
     # 7) Record artifacts into KG
+    span = trace.start_span("orchestrate_record_kg") if trace else None
     try:
         for path, code in artifacts.get("files", {}).items():
             kg.add_code_artifact(code, "module", {"path": path, "source": "orchestrate"})
@@ -121,6 +143,8 @@ async def orchestrate_task_async(server: Any, task: str, constraints: Optional[D
             kg.add_code_artifact(code, "test", {"path": path, "source": "orchestrate"})
     except Exception:
         pass
+    if trace:
+        trace.end_span(span, status="ok")
 
     return {
         "plan": plan,

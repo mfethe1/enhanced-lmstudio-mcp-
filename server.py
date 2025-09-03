@@ -4737,6 +4737,43 @@ def main():
         except Exception:
             logger.info("Persistent storage initialized")
 
+        # Optional /metrics exporter (built-in, lightweight)
+        try:
+            import threading
+            from http.server import BaseHTTPRequestHandler, HTTPServer
+            METRICS_BIND = os.getenv("METRICS_BIND", "127.0.0.1:9099")
+            host, port = METRICS_BIND.split(":", 1)
+            class _MetricsHandler(BaseHTTPRequestHandler):
+                def do_GET(self):  # type: ignore
+                    if self.path != "/metrics":
+                        self.send_response(404); self.end_headers(); return
+                    try:
+                        payload = metrics_payload_bytes()
+                        if getattr(server, 'production', None) is not None:
+                            snap = server.production.metrics_snapshot()
+                            extra = ("\n# optimizer\n" + "\n".join([f"mcp_optimizer_{k} {v}" for k, v in snap.items() if isinstance(v, (int,float))])).encode("utf-8")
+                        else:
+                            extra = b""
+                        body = payload + extra
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/plain; version=0.0.4")
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+                    except Exception:
+                        self.send_response(500); self.end_headers()
+            def _serve_metrics():
+                try:
+                    httpd = HTTPServer((host, int(port)), _MetricsHandler)
+                    httpd.serve_forever()
+                except Exception as e:
+                    logger.warning("Metrics server disabled: %s", e)
+            if os.getenv("METRICS_EXPORTER", "1").lower() in {"1","true","yes","on"}:
+                threading.Thread(target=_serve_metrics, name="metrics-http", daemon=True).start()
+                logger.info("/metrics exporter on http://%s:%s/metrics", host, port)
+        except Exception:
+            pass
+
         # MCP protocol communication via stdin/stdout with Content-Length framing support
         use_headers = False
         try:
