@@ -4204,6 +4204,13 @@ def handle_agent_team_plan_and_code(arguments, server):
             resp += "\n\n[Applied changes]\n" + "\n".join(applied)
         return _compact_text(resp, max_chars=4000)
 
+# Validation engine integration (wraps review & TDD flows)
+try:
+    from validation_engine import integrate_with_agent_review_and_tdd as _integrate_validation
+    _integrate_validation(get_server_singleton())
+except Exception:
+    pass
+
 def handle_agent_team_review_and_test(arguments, server):
     diff = (arguments.get("diff") or "").strip()
     if not diff:
