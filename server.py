@@ -4056,11 +4056,11 @@ def handle_propose_research(arguments, server):
     )
     try:
         try:
-            resp = asyncio.get_event_loop().run_until_complete(server.make_llm_request_with_retry(prompt, temperature=0.2))
+            resp = asyncio.get_event_loop().run_until_complete(get_server_singleton().make_llm_request_with_retry(prompt, temperature=0.2))
         except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            resp = loop.run_until_complete(server.make_llm_request_with_retry(prompt, temperature=0.2))
+            resp = loop.run_until_complete(get_server_singleton().make_llm_request_with_retry(prompt, temperature=0.2))
             loop.close()
     except Exception as e:
         resp = f"Error proposing research: {e}"
@@ -4380,11 +4380,11 @@ def handle_agent_team_review_and_test(arguments, server):
         )
         try:
             try:
-                resp = asyncio.get_event_loop().run_until_complete(server.make_llm_request_with_retry(prompt, temperature=0.2))
+                resp = asyncio.get_event_loop().run_until_complete(get_server_singleton().make_llm_request_with_retry(prompt, temperature=0.2))
             except RuntimeError:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                resp = loop.run_until_complete(server.make_llm_request_with_retry(prompt, temperature=0.2))
+                resp = loop.run_until_complete(get_server_singleton().make_llm_request_with_retry(prompt, temperature=0.2))
                 loop.close()
         except Exception as e2:
             resp = f"Error synthesizing review: {e}; fallback failed: {e2}"
@@ -4421,11 +4421,11 @@ def handle_agent_team_refactor(arguments, server):
         )
         try:
             try:
-                resp = asyncio.get_event_loop().run_until_complete(server.make_llm_request_with_retry(prompt, temperature=0.2))
+                resp = asyncio.get_event_loop().run_until_complete(get_server_singleton().make_llm_request_with_retry(prompt, temperature=0.2))
             except RuntimeError:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                resp = loop.run_until_complete(server.make_llm_request_with_retry(prompt, temperature=0.2))
+                resp = loop.run_until_complete(get_server_singleton().make_llm_request_with_retry(prompt, temperature=0.2))
                 loop.close()
         except Exception as e2:
             resp = f"Error synthesizing refactor: {e}; fallback failed: {e2}"
