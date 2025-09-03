@@ -2143,6 +2143,7 @@ def handle_tool_call(message):
             "code_hotspots": (handle_code_hotspots, True),
             "import_graph": (handle_import_graph, True),
             "file_scaffold": (handle_file_scaffold, True),
+            "mcts_plan_solution": (handle_mcts_plan_solution, True),
 
             # Optional debugging and thinking tools (available but not advertised in minimal surface)
             "sequential_thinking": (handle_sequential_thinking, True),
@@ -4121,6 +4122,32 @@ def _read_files_for_context(paths: list[str]) -> str:
         except Exception:
             continue
     return _compact_text("\n\n".join(parts), max_chars=4000)
+
+def handle_mcts_plan_solution(arguments, server):
+    """Plan code generation steps using MCTS.
+    arguments: { task: str, constraints?: dict, initial_code?: str, max_iterations?: int }
+    """
+    task = (arguments.get("task") or "").strip()
+    if not task:
+        return {"error": "'task' is required"}
+    constraints = arguments.get("constraints") or {}
+    initial_code = arguments.get("initial_code") or ""
+    max_iter = int(arguments.get("max_iterations", 400))
+    try:
+        from cognitive_architecture.mcts_planner import MCTSCodePlanner
+        planner = MCTSCodePlanner(get_server_singleton(), max_iterations=max_iter)
+        try:
+            node = asyncio.get_event_loop().run_until_complete(planner.plan_solution(task, constraints, initial_code))
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            try:
+                asyncio.set_event_loop(loop)
+                node = loop.run_until_complete(planner.plan_solution(task, constraints, initial_code))
+            finally:
+                loop.close()
+        return node
+    except Exception as e:
+        return {"error": str(e)}
 
 def handle_agent_spawn_and_execute(arguments, server):
     """Spawn specialized agents for a task and execute with a chosen strategy.
