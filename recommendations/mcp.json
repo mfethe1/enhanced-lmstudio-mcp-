@@ -26,6 +26,9 @@
         "HTTP_READ_TIMEOUT_COMPLEX": "180",
         "HTTP_MAX_RETRIES": "3",
         "HTTP_BACKOFF_FACTOR": "1.5",
+        "MCP_OPTIMIZER": "1",
+        "METRICS_EXPORTER": "1",
+        "METRICS_BIND": "127.0.0.1:9099",
 
         "LMSTUDIO_FUNCTION_MODEL": "bytedance/seed-oss-36b",
         "TOOLCALL_DEFAULT_TEMPERATURE": "0.15",
