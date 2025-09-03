@@ -98,7 +98,7 @@ def handle_agent_team_plan_and_code(arguments: Dict[str, Any], server) -> str:
             resp = f"Error synthesizing plan: {e}; fallback failed: {e2}"
         if apply_changes:
             from server import _apply_proposed_changes
-            applied = _apply_proposed_changes(resp)
+            applied = _apply_proposed_changes(resp, dry_run=False)
             resp += "\n\n[Applied changes]\n" + "\n".join(applied)
     return _compact_text(resp, max_chars=4000)
 

@@ -3880,11 +3880,20 @@ def _apply_proposed_changes(proposal_text: str, dry_run: bool = False) -> list[s
             continue
         header = lines[idx].strip()
         path_val = None
-        if header.lower().startswith("# file:"):
-            path_val = header.split(":", 1)[1].strip()
+        if header.lower().startswith("# file:") or header.lower().startswith("# file"):
+            # support variants like '# File: x' and '# File x'
+            parts = header.split(":", 1)
+            if len(parts) == 2:
+                path_val = parts[1].strip()
+            else:
+                path_val = header.split(None, 1)[1].strip()
             idx += 1
-        elif header.lower().startswith("# path:"):
-            path_val = header.split(":", 1)[1].strip()
+        elif header.lower().startswith("# path:") or header.lower().startswith("# path"):
+            parts = header.split(":", 1)
+            if len(parts) == 2:
+                path_val = parts[1].strip()
+            else:
+                path_val = header.split(None, 1)[1].strip()
             idx += 1
         if not path_val:
             continue
@@ -4294,12 +4303,13 @@ def handle_agent_team_plan_and_code(arguments, server):
             f"Task: {task_desc}\nConstraints: {constraints}\n\nFiles Context (truncated):\n{file_ctx}\n\nOutput steps 1-3."
         )
         try:
+            # Call class method directly so test monkeypatch on class takes effect
+            coro = EnhancedLMStudioMCPServer.make_llm_request_with_retry(get_server_singleton(), prompt, temperature=0.2)
             try:
-                # Use class method on singleton to honor test monkeypatch
-                resp = asyncio.get_event_loop().run_until_complete(get_server_singleton().make_llm_request_with_retry(prompt, temperature=0.2))
+                resp = asyncio.get_event_loop().run_until_complete(coro)
             except RuntimeError:
                 loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
-                resp = loop.run_until_complete(get_server_singleton().make_llm_request_with_retry(prompt, temperature=0.2))
+                resp = loop.run_until_complete(coro)
                 loop.close()
         except Exception as e2:
             resp = f"Error synthesizing plan: {e}; fallback failed: {e2}"
