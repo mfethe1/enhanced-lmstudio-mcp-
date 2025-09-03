@@ -264,6 +264,26 @@ except Exception:
 # Singleton server instance (P1)
 _server_singleton: Optional["EnhancedLMStudioMCPServer"] = None
 
+# Enable production optimizer if flagged
+try:
+    if os.getenv("MCP_OPTIMIZER", "1").lower() in {"1","true","yes","on"}:
+        from production_optimizer import integrate_with_server as _opt_integ
+        # Delay optimizer integration until server singleton is available
+        def _defer_opt():
+            try:
+                s = get_server_singleton()
+                if s:
+                    _opt_integ(s)
+            except Exception:
+                pass
+        try:
+            import threading
+            threading.Timer(0.01, _defer_opt).start()
+        except Exception:
+            _defer_opt()
+except Exception:
+    pass
+
 
 # Globals for audit/workflow subsystems
 _audit_logger: Optional[ImmutableAuditLogger] = None
@@ -2074,6 +2094,7 @@ def handle_tool_call(message):
             "agent_team_plan_and_code": (handle_agent_team_plan_and_code, True),
             "agent_team_review_and_test": (handle_agent_team_review_and_test, True),
             "agent_team_refactor": (handle_agent_team_refactor, True),
+            "agent_spawn_and_execute": (handle_agent_spawn_and_execute, True),
 
             # Code understanding
             "analyze_code": (lambda args, srv: handle_llm_analysis_tool("analyze_code", args, srv), True),
@@ -4100,6 +4121,28 @@ def _read_files_for_context(paths: list[str]) -> str:
         except Exception:
             continue
     return _compact_text("\n\n".join(parts), max_chars=4000)
+
+def handle_agent_spawn_and_execute(arguments, server):
+    """Spawn specialized agents for a task and execute with a chosen strategy.
+    arguments: { task: str, strategy?: 'sequential'|'parallel'|'hierarchical', context?: dict }
+    """
+    task_desc = (arguments.get("task") or "").strip()
+    if not task_desc:
+        raise ValidationError("'task' is required")
+    strategy = (arguments.get("strategy") or "sequential").strip().lower()
+    context = arguments.get("context") or {}
+    try:
+        from cognitive_architecture.agent_spawner import get_spawner
+        spawner = get_spawner(get_server_singleton())
+        req_caps = asyncio.get_event_loop().run_until_complete(spawner.analyze_task_requirements(task_desc, context))
+        agents = []
+        for i in range(max(2, min(5, len(req_caps) or 2))):
+            ag = asyncio.get_event_loop().run_until_complete(spawner.spawn_or_retrieve_agent(req_caps, task_id=f"{task_desc[:24]}_{i}"))
+            agents.append(ag)
+        res = asyncio.get_event_loop().run_until_complete(spawner.execute_with_agents(task_desc, agents, coordination_strategy=strategy))
+        return res
+    except Exception as e:
+        return {"error": str(e)}
 
 def handle_agent_team_plan_and_code(arguments, server):
     task_desc = (arguments.get("task") or "").strip()
