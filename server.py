@@ -1661,7 +1661,13 @@ def handle_chat_with_tools(arguments, server):
                 operation_type="simple"
             )
         except Exception as e:
-            return f"Error: {str(e)[:200]}"
+            # Return structured output even on error for test stability
+            return {
+                "content": f"Error: {str(e)[:200]}",
+                "transcript": transcript,
+                "model": model,
+                "tool_choice": tool_choice,
+            }
         choice = (data.get("choices") or [{}])[0]
         msg = choice.get("message", {})
         tool_calls = msg.get("tool_calls") or []
@@ -4288,7 +4294,7 @@ def handle_agent_team_plan_and_code(arguments, server):
             resp = f"Error synthesizing plan: {e}; fallback failed: {e2}"
         # Apply changes if requested and response includes fenced code blocks
         if apply_changes:
-            applied = _apply_proposed_changes(resp)
+            applied = _apply_proposed_changes(resp, dry_run=False)
             resp += "\n\n[Applied changes]\n" + "\n".join(applied)
         return _compact_text(resp, max_chars=4000)
 
