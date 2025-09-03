@@ -355,7 +355,7 @@ def _register_all_handlers(server):
     server.registry.register("read_file_content", code_tools.handle_file_read, needs_server=False)
     server.registry.register("read_file_range", code_tools.handle_read_file_range, needs_server=True)
     server.registry.register("list_directory", code_tools.handle_list_directory, needs_server=True)
-    server.registry.register("write_file_content", code_tools.handle_file_write, needs_server=False)
+    server.registry.register("write_file_content", handle_file_write, needs_server=False)
     server.registry.register("search_files", code_tools.handle_file_search, needs_server=False)
     server.registry.register("code_hotspots", code_tools.handle_code_hotspots, needs_server=True)
     server.registry.register("import_graph", code_tools.handle_import_graph, needs_server=True)
