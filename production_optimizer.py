@@ -84,11 +84,13 @@ class ParallelToolExecutor:
         self.pool = ThreadPoolExecutor(max_workers=max_workers)
 
     async def run(self, tool_calls: Iterable[Dict[str, Any]]) -> List[Any]:
+        # Use module-level handler to avoid assuming method on server instance
+        import server as mcp_server  # local import to avoid cycles on import time
         loop = asyncio.get_event_loop()
         tasks = []
         for call in tool_calls:
             payload = {"jsonrpc": "2.0", "id": _now_ms(), "params": call}
-            tasks.append(loop.run_in_executor(self.pool, self.server.handle_tool_call, payload))
+            tasks.append(loop.run_in_executor(self.pool, mcp_server.handle_tool_call, payload))
         return await asyncio.gather(*tasks, return_exceptions=True)
 
 
@@ -328,7 +330,16 @@ def integrate_with_server(server: Any) -> None:
 
             async def _wrapped(prompt: str, temperature: float = 0.35, **kwargs):
                 shaped = server.production.augment.shape_prompt(prompt)
-                return await server.production.cached_llm(shaped, temperature=temperature, intent=kwargs.get("intent"), role=kwargs.get("role"))
+                # Avoid caching errors; if underlying call fails, return error string and do not cache
+                try:
+                    out = await server.production.lb.llm(shaped, temperature=temperature)
+                    server.production.cache.put(_semantic_key(shaped, temperature, extra=f"{kwargs.get('intent')}|{kwargs.get('role')}") , out, meta={"intent": kwargs.get("intent"), "role": kwargs.get("role")})
+                    # update metrics
+                    server.production._metrics["cache_misses"] += 1
+                    server.production._metrics["llm_call_count"] += 1
+                    return out
+                except Exception as e:
+                    return f"Error: {str(e)[:200]}"
 
             server.make_llm_request_with_retry = _wrapped  # type: ignore
     except Exception:
