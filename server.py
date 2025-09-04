@@ -798,6 +798,20 @@ class EnhancedLMStudioMCPServer:
 
     async def _lmstudio_request_with_retry(self, prompt: str, temperature: float = 0.35, retries: int = 2, backoff: float = 0.5) -> str:
         """Direct LM Studio request with enhanced HTTP client, circuit breaker, and retry logic"""
+    async def _post_chat_with_fallback(self, url: str, payload: dict, headers: dict, operation_type: str) -> dict:
+        """POST to chat API, retrying with max_completion_tokens if max_tokens unsupported."""
+        try:
+            return await self.http_client.post_async(url, json_data=payload, headers=headers, operation_type=operation_type)
+        except Exception as e:
+            msg = str(e)
+            if "Unsupported parameter: 'max_tokens'" in msg or "max_tokens is not supported" in msg:
+                payload2 = dict(payload)
+                if "max_tokens" in payload2:
+                    payload2.pop("max_tokens", None)
+                    payload2["max_completion_tokens"] = 4000
+                return await self.http_client.post_async(url, json_data=payload2, headers=headers, operation_type=operation_type)
+            raise
+
         circuit_breaker = _circuit_breakers["lmstudio"]
 
         # Check circuit breaker
@@ -815,9 +829,9 @@ class EnhancedLMStudioMCPServer:
         while attempt <= retries:
             try:
                 # Use enhanced HTTP client
-                response_data = await self.http_client.post_async(
+                response_data = await self._post_chat_with_fallback(
                     f"{self.base_url}/v1/chat/completions",
-                    json_data={
+                    payload={
                         "model": self.model_name,
                         "messages": [{"role": "user", "content": prompt}],
                         "temperature": temperature,
@@ -1023,9 +1037,9 @@ class EnhancedLMStudioMCPServer:
                 # Use enhanced HTTP client with adaptive timeout
                 operation_type = "complex" if len(prompt) > 2000 else "simple"
                 try:
-                    response_data = await self.http_client.post_async(
+                    response_data = await self._post_chat_with_fallback(
                         f"{base}/chat/completions",
-                        json_data={"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": temperature, "max_tokens": max_tokens},
+                        payload={"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": temperature, "max_tokens": max_tokens},
                         headers={"Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}", "Content-Type": "application/json"},
                         operation_type=operation_type
                     )
@@ -1704,12 +1718,29 @@ def handle_chat_with_tools(arguments, server):
 
         # Use centralized HTTP client (sync) for consistency and pooling
         try:
-            data = _http_client.post_sync(
-                f"{server.base_url}/v1/chat/completions",
-                json_data=payload,
-                headers={"Content-Type": "application/json"},
-                operation_type="simple"
-            )
+            # Try with max_tokens first, then retry with max_completion_tokens if needed
+            try:
+                data = _http_client.post_sync(
+                    f"{server.base_url}/v1/chat/completions",
+                    json_data=payload,
+                    headers={"Content-Type": "application/json"},
+                    operation_type="simple"
+                )
+            except Exception as e1:
+                msg = str(e1)
+                if "Unsupported parameter: 'max_tokens'" in msg or "max_tokens is not supported" in msg:
+                    payload2 = dict(payload)
+                    if "max_tokens" in payload2:
+                        payload2.pop("max_tokens", None)
+                        payload2["max_completion_tokens"] = max_tokens
+                    data = _http_client.post_sync(
+                        f"{server.base_url}/v1/chat/completions",
+                        json_data=payload2,
+                        headers={"Content-Type": "application/json"},
+                        operation_type="simple"
+                    )
+                else:
+                    raise
         except Exception as e:
             # Return structured output even on error for test stability
             return {
