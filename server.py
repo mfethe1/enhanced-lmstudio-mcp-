@@ -2062,18 +2062,24 @@ def handle_deep_research(arguments, server):
                 f"Query: {query}\n\nFindings:\n{fc_summary or fc_raw_text}\n\n"
                 "Output only text."
             )
-            # Use the centralized LLM helper with retry
+            # Use the centralized LLM helper with retry (ensure coroutine is awaited or closed on error)
             try:
-                llm_out = asyncio.get_event_loop().run_until_complete(
-                    server.make_llm_request_with_retry(synthesis_prompt, temperature=0.2)
-                )
+                coro = server.make_llm_request_with_retry(synthesis_prompt, temperature=0.2)
+                loop = asyncio.get_event_loop()
+                try:
+                    llm_out = loop.run_until_complete(coro)
+                except Exception:
+                    try:
+                        coro.close()
+                    except Exception:
+                        pass
+                    raise
             except RuntimeError:
                 loop = asyncio.new_event_loop()
                 try:
                     asyncio.set_event_loop(loop)
-                    llm_out = loop.run_until_complete(
-                        server.make_llm_request_with_retry(synthesis_prompt, temperature=0.2)
-                    )
+                    coro = server.make_llm_request_with_retry(synthesis_prompt, temperature=0.2)
+                    llm_out = loop.run_until_complete(coro)
                 finally:
                     loop.close()
             stage2 = {"report": _compact_text(llm_out)}

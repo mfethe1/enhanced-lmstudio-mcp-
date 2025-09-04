@@ -6,6 +6,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
+import inspect
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -210,7 +211,14 @@ class ProactiveResearchOrchestrator:
             from server import handle_deep_research  # local import to avoid cycle at module import
         except Exception as e:  # pragma: no cover
             raise RuntimeError(f"deep_research unavailable: {e}")
-        return handle_deep_research({"query": topic, "time_limit": 180, "max_depth": 4}, self.server)
+        # Ensure handler return is str; coerce if it returns JSON-like structure
+        out = handle_deep_research({"query": topic, "time_limit": 180, "max_depth": 4}, self.server)
+        if isinstance(out, dict):
+            try:
+                return json.dumps(out)
+            except Exception:
+                return str(out)
+        return out
 
     def _store_artifact(self, *, topic: str, content: str, tags: List[str]) -> None:
         # Try V2 artifacts; fallback to simple memory
