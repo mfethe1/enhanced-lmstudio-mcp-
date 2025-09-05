@@ -34,9 +34,9 @@
         "TOOLCALL_DEFAULT_TEMPERATURE": "0.15",
         "TOOLCALL_TOOL_CHOICE_DEFAULT": "required",
 
-        "OPENAI_MODEL": "gpt-5",
+        "OPENAI_MODEL": "gpt-4o-mini",
         "OPENAI_BASE_URL": "https://api.openai.com/v1",
-        "ANTHROPIC_MODEL": "claude-4-sonnet",
+        "ANTHROPIC_MODEL": "claude-3-5-sonnet-latest",
         "ANTHROPIC_BASE_URL": "https://api.anthropic.com/v1",
         "ANTHROPIC_VERSION": "2023-06-01",
         "OVERSEER_USE_OPUS": "1",

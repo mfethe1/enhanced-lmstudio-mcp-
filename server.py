@@ -558,27 +558,70 @@ def _extract_code_from_text(text: str) -> str:
             keep.append(ln)
     return "\n".join(keep).strip()
 
-# --- Secrets loader (local .secrets/.env.local) ---
-_DEF_SECRETS_PATH = Path('.secrets/.env.local')
+# --- Secrets loader (supports .env.local/.env and .secrets variants) ---
+# Prefer .secrets/.env.local over others to match user workflow
+_ENV_CANDIDATES = [
+    Path('.secrets/.env.local'),
+    Path('.secrets/.env'),
+    Path('.env.local'),
+    Path('.env'),
+]
+# Keys that should be force-overridden by env files (common backend creds)
+_ENV_FORCE_OVERRIDE_KEYS = {
+    'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_VERSION',
+    'OPENAI_API_KEY', 'OPENAI_MODEL', 'OPENAI_BASE_URL',
+    'LMSTUDIO_API_KEY', 'LMSTUDIO_API_BASE', 'LM_STUDIO_URL', 'LMSTUDIO_MODEL', 'MODEL_NAME',
+    'FIRECRAWL_API_KEY', 'FIRECRAWL_BASE_URL'
+}
+
+def _parse_env_line(line: str) -> tuple[str, str] | None:
+    s = line.strip()
+    if not s or s.startswith('#'):
+        return None
+    if s.startswith('export '):
+        s = s[len('export '):].strip()
+    if '=' not in s:
+        return None
+    k, v = s.split('=', 1)
+    k = k.strip()
+    v = v.strip()
+    if len(v) >= 2 and ((v[0] == v[-1]) and v[0] in {'"', "'"}):
+        v = v[1:-1]
+    return (k, v)
 
 def _load_local_secrets():
+    loaded_keys: set[str] = set()
     try:
-        if _DEF_SECRETS_PATH.exists():
-            logger.info(f"Loading local secrets from {_DEF_SECRETS_PATH}")
-            for line in _DEF_SECRETS_PATH.read_text(encoding='utf-8').splitlines():
-                line = line.strip()
-                if not line or line.startswith('#'):
+        for p in _ENV_CANDIDATES:
+            try:
+                if not p.exists():
                     continue
-                if '=' not in line:
-                    continue
-                k, v = line.split('=', 1)
-                k = k.strip()
-                v = v.strip()
-                # Do not overwrite existing env
-                if k and (k not in os.environ or not os.environ[k]):
-                    os.environ[k] = v
+                logger.info(f"Loading local env from {p}")
+                for raw in p.read_text(encoding='utf-8').splitlines():
+                    kv = _parse_env_line(raw)
+                    if not kv:
+                        continue
+                    k, v = kv
+                    if not k:
+                        continue
+                    # Force-override critical keys to match .env.local exactly
+                    if k in _ENV_FORCE_OVERRIDE_KEYS:
+                        os.environ[k] = v
+                        loaded_keys.add(k)
+                    else:
+                        # Do not overwrite existing env for non-critical keys
+                        if k not in os.environ or not os.environ[k]:
+                            os.environ[k] = v
+                            loaded_keys.add(k)
+            except Exception as ie:
+                logger.debug(f"Skipping env file {p}: {ie}")
     except Exception as e:
-        logger.warning(f"Failed to load local secrets: {e}")
+        logger.warning(f"Failed to load local env: {e}")
+    if loaded_keys:
+        try:
+            logger.info("Loaded env keys: %s", ", ".join(sorted(list(loaded_keys))[:20]) + ("..." if len(loaded_keys) > 20 else ""))
+        except Exception:
+            pass
 
 _load_local_secrets()
 
@@ -796,8 +839,6 @@ class EnhancedLMStudioMCPServer:
         except Exception as e:
             raise Exception(f"Operation failed ({operation_type}): {str(e)}")
 
-    async def _lmstudio_request_with_retry(self, prompt: str, temperature: float = 0.35, retries: int = 2, backoff: float = 0.5) -> str:
-        """Direct LM Studio request with enhanced HTTP client, circuit breaker, and retry logic"""
     async def _post_chat_with_fallback(self, url: str, payload: dict, headers: dict, operation_type: str) -> dict:
         """POST to chat API, retrying with max_completion_tokens if max_tokens unsupported."""
         try:
@@ -811,6 +852,9 @@ class EnhancedLMStudioMCPServer:
                     payload2["max_completion_tokens"] = 4000
                 return await self.http_client.post_async(url, json_data=payload2, headers=headers, operation_type=operation_type)
             raise
+
+    async def _lmstudio_request_with_retry(self, prompt: str, temperature: float = 0.35, retries: int = 2, backoff: float = 0.5) -> str:
+        """Direct LM Studio request with enhanced HTTP client, circuit breaker, and retry logic"""
 
         circuit_breaker = _circuit_breakers["lmstudio"]
 
@@ -858,6 +902,29 @@ class EnhancedLMStudioMCPServer:
             attempt += 1
             if attempt <= retries:
                 await asyncio.sleep(backoff * attempt)
+
+        # As a last-resort fallback, if LM Studio is unreachable and OpenAI is configured, try OpenAI directly
+        try:
+            if os.getenv("OPENAI_API_KEY"):
+                obase = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+                omodel = os.getenv("OPENAI_FALLBACK_MODEL") or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+                oresp = await self._post_chat_with_fallback(
+                    f"{obase}/chat/completions",
+                    payload={
+                        "model": omodel,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": temperature,
+                        "max_tokens": 4000
+                    },
+                    headers={"Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}", "Content-Type": "application/json"},
+                    operation_type=operation_type
+                )
+                if "choices" in oresp and oresp["choices"]:
+                    content = oresp["choices"][0]["message"].get("content", "")
+                    if content.strip():
+                        return _sanitize_llm_output(content)
+        except Exception:
+            pass
 
         # Record failure in circuit breaker
         circuit_breaker.record_failure()
@@ -1742,13 +1809,28 @@ def handle_chat_with_tools(arguments, server):
                 else:
                     raise
         except Exception as e:
-            # Return structured output even on error for test stability
-            return {
-                "content": f"Error: {str(e)[:200]}",
-                "transcript": transcript,
-                "model": model,
-                "tool_choice": tool_choice,
-            }
+            # If LM Studio unreachable, try OpenAI directly when API key is present
+            try:
+                _okey = _os.getenv("OPENAI_API_KEY")
+                if _okey:
+                    obase = _os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+                    data = _http_client.post_sync(
+                        f"{obase}/chat/completions",
+                        json_data=payload,
+                        headers={"Authorization": f"Bearer {_okey}", "Content-Type": "application/json"},
+                        operation_type="simple"
+                    )
+                else:
+                    raise RuntimeError("no_openai_key")
+            except Exception as e2:
+                # Return structured output even on error for test stability
+                return {
+                    "content": f"Error: {str(e)[:200]}",
+                    "transcript": transcript,
+                    "model": model,
+                    "tool_choice": tool_choice,
+                }
+
         choice = (data.get("choices") or [{}])[0]
         # Note: keep literal here to satisfy tests that scan source code
         # timeout=(60, 240)
@@ -4633,8 +4715,9 @@ def handle_error_patterns(arguments, server):
         return f"No error patterns found in the last {hours} hours ✅"
 
 def handle_health_check(arguments, server):
-    """Health check with optional LM Studio readiness probe.
-    Pass probe_lm=true to attempt a short model readiness check.
+    """Health check with optional LM Studio readiness probe and provider pings.
+    - probe_lm=true: issues a small LM call (ping)
+    - probe_providers=true: pings OpenAI, Anthropic, and LM Studio with "hi"
     """
     probe = arguments.get("probe_lm", False)
     lm_ready = None
@@ -4642,13 +4725,10 @@ def handle_health_check(arguments, server):
 
     if probe:
         try:
-            # Lightweight prompt with small timeout
             prompt = "ping"
-            # Use the centralized LLM request with short backoff
             lm_resp = asyncio.get_event_loop().run_until_complete(
                 server.make_llm_request_with_retry(prompt, temperature=0.0, retries=0, backoff=0.1)
             )
-            # If the call returns a string without error prefix, consider ready
             lm_ready = not lm_resp.startswith("Error:")
             if not lm_ready:
                 lm_error = lm_resp
@@ -4679,12 +4759,71 @@ def handle_health_check(arguments, server):
         tools_count = 0
 
     # Router diagnostics availability
+    router_ok = False
+    router_len = 0
     try:
         router_ok = hasattr(server, '_router_log')
         router_len = len(getattr(server, '_router_log', []))
     except Exception:
         router_ok = False
         router_len = 0
+
+    # Optional: quick external providers ping when requested
+    providers = None
+    if arguments.get("probe_providers", False):
+        providers = {}
+        # OpenAI
+        try:
+            obase = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+            omodel = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+            if os.getenv("OPENAI_API_KEY"):
+                data = _http_client.post_sync(
+                    f"{obase}/chat/completions",
+                    json_data={"model": omodel, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 8},
+                    headers={"Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}", "Content-Type": "application/json"},
+                    operation_type="simple"
+                )
+                providers["openai"] = {"ok": True, "model": omodel, "reply": (data.get("choices", [{}])[0].get("message", {}).get("content", "") or "")[:80]}
+            else:
+                providers["openai"] = {"ok": False, "error": "OPENAI_API_KEY missing"}
+        except Exception as e:
+            providers["openai"] = {"ok": False, "error": str(e)[:200]}
+        # Anthropic
+        try:
+            abase = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1").rstrip("/")
+            amodel = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
+            if os.getenv("ANTHROPIC_API_KEY"):
+                data = _http_client.post_sync(
+                    f"{abase}/messages",
+                    json_data={"model": amodel, "max_tokens": 8, "messages": [{"role": "user", "content": "hi"}]},
+                    headers={"x-api-key": os.getenv("ANTHROPIC_API_KEY"), "anthropic-version": os.getenv("ANTHROPIC_VERSION", "2023-06-01"), "content-type": "application/json"},
+                    operation_type="simple"
+                )
+                # Anthropic returns content as array of parts
+                content = ""
+                try:
+                    parts = data.get("content", [])
+                    content = "".join([p.get("text", "") for p in parts if isinstance(p, dict)])
+                except Exception:
+                    pass
+                providers["anthropic"] = {"ok": True, "model": amodel, "reply": (content or "")[:80]}
+            else:
+                providers["anthropic"] = {"ok": False, "error": "ANTHROPIC_API_KEY missing"}
+        except Exception as e:
+            providers["anthropic"] = {"ok": False, "error": str(e)[:200]}
+        # LM Studio
+        try:
+            lbase = os.getenv("LMSTUDIO_API_BASE", "http://localhost:1234/v1").rstrip("/")
+            lmodel = os.getenv("LMSTUDIO_MODEL", os.getenv("MODEL_NAME", "openai/gpt-oss-20b"))
+            data = _http_client.post_sync(
+                f"{lbase}/chat/completions",
+                json_data={"model": lmodel, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 8},
+                headers={"Content-Type": "application/json"},
+                operation_type="simple"
+            )
+            providers["lmstudio"] = {"ok": True, "model": lmodel, "reply": (data.get("choices", [{}])[0].get("message", {}).get("content", "") or "")[:80]}
+        except Exception as e:
+            providers["lmstudio"] = {"ok": False, "error": str(e)[:200]}
 
     return {
         "ok": True,
@@ -4693,6 +4832,7 @@ def handle_health_check(arguments, server):
         "execution_enabled": _execution_enabled(),
         "tools": {"ok": tools_ok, "count": tools_count},
         "router": {"ok": router_ok, "recent": router_len},
+        "providers": providers,
         "lm": {
             "url": server.base_url,
             "model": server.model_name,
