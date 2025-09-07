@@ -442,6 +442,8 @@ def _register_all_handlers(server):
     server.registry.register("artifact_create", handle_artifact_create, needs_server=True)
     server.registry.register("artifacts_list", handle_artifacts_list, needs_server=True)
     server.registry.register("session_analytics", handle_session_analytics, needs_server=True)
+    server.registry.register("router_config", handle_router_config, needs_server=True)
+
 
 
 
@@ -893,6 +895,26 @@ class EnhancedLMStudioMCPServer:
                     else:
                         last_err = "Empty response from model"
                 else:
+                    # If chat endpoint not available (404), try /v1/completions with prompt
+                    if "HTTP 404" in str(response_data):
+                        compl_payload = {
+                            "model": self.model_name,
+                            "prompt": prompt,
+                            "max_tokens": 4000,
+                            "temperature": temperature,
+                        }
+                        response_data = await self.http_client.post_async(
+                            f"{self.base_url}/v1/completions",
+                            json_data=compl_payload,
+                            headers={"Content-Type": "application/json"},
+                            operation_type=operation_type
+                        )
+                        choices = response_data.get("choices") or []
+                        if choices:
+                            text = choices[0].get("text", "")
+                            if text.strip():
+                                circuit_breaker.record_success()
+                                return _sanitize_llm_output(text)
                     last_err = "No choices in response"
 
             except Exception as e:
@@ -1438,6 +1460,7 @@ def get_all_tools():
 
             # System
             {"name": "health_check", "description": "Check server health and connectivity", "inputSchema": {"type":"object","properties":{}}},
+            {"name": "router_config", "description": "Show active model routing configuration and thresholds", "inputSchema": {"type":"object","properties":{}}},
             {"name": "get_version", "description": "Get server version and system information", "inputSchema": {"type":"object","properties":{}}},
 
             # Research helper
@@ -1803,6 +1826,20 @@ def handle_chat_with_tools(arguments, server):
                     data = _http_client.post_sync(
                         f"{server.base_url}/v1/chat/completions",
                         json_data=payload2,
+                        headers={"Content-Type": "application/json"},
+                        operation_type="simple"
+                    )
+                elif "HTTP 404" in msg:
+                    # Fallback to /v1/completions (instruct) when chat API not available
+                    compl_payload = {
+                        "model": model,
+                        "prompt": transcript,
+                        "max_tokens": max_tokens,
+                        "temperature": temperature,
+                    }
+                    data = _http_client.post_sync(
+                        f"{server.base_url}/v1/completions",
+                        json_data=compl_payload,
                         headers={"Content-Type": "application/json"},
                         operation_type="simple"
                     )
@@ -4841,7 +4878,31 @@ def handle_health_check(arguments, server):
         } if probe else None,
     }
 
-
+def handle_router_config(arguments, server):
+    """Return the active routing-related environment and thresholds.
+    This is informational for debugging how complexity-based routing is configured.
+    """
+    cfg = {
+        "anthropic": {
+            "smart_switch": os.getenv("ANTHROPIC_SMART_SWITCH", "0"),
+            "model_default": os.getenv("ANTHROPIC_MODEL", ""),
+            "model_overseer": os.getenv("ANTHROPIC_MODEL_OVERSEER", ""),
+            "model_complex": os.getenv("ANTHROPIC_MODEL_COMPLEX", ""),
+            "opus_for_analysis": os.getenv("OPUS_FOR_ANALYSIS", "0"),
+            "opus_for_low_conf": os.getenv("OPUS_FOR_LOW_CONF", "0"),
+            "low_conf_threshold": os.getenv("LOW_CONF_THRESHOLD", "0.5"),
+            "use_opus_for_overseer": os.getenv("OVERSEER_USE_OPUS", "0"),
+        },
+        "openai": {
+            "model_default": os.getenv("OPENAI_MODEL", ""),
+            "base_url": os.getenv("OPENAI_BASE_URL", ""),
+        },
+        "lmstudio": {
+            "model_default": os.getenv("LMSTUDIO_MODEL", os.getenv("MODEL_NAME", "")),
+            "base": os.getenv("LMSTUDIO_API_BASE", ""),
+        }
+    }
+    return cfg
 def handle_get_version(arguments, server):
     return {
         "name": "enhanced-lmstudio-assistant",
