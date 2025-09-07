@@ -432,6 +432,8 @@ def _register_all_handlers(server):
     # System/Router/Session (keep in server.py implementation)
     server.registry.register("health_check", handle_health_check, needs_server=True)
     server.registry.register("get_version", handle_get_version, needs_server=True)
+    server.registry.register("router_config", handle_router_config, needs_server=True)
+
     server.registry.register("router_diagnostics", handle_router_diagnostics, needs_server=True)
     server.registry.register("router_test", handle_router_test, needs_server=True)
     server.registry.register("router_battery", handle_router_battery, needs_server=True)
@@ -842,17 +844,39 @@ class EnhancedLMStudioMCPServer:
             raise Exception(f"Operation failed ({operation_type}): {str(e)}")
 
     async def _post_chat_with_fallback(self, url: str, payload: dict, headers: dict, operation_type: str) -> dict:
-        """POST to chat API, retrying with max_completion_tokens if max_tokens unsupported."""
+        """POST to chat API, with fallbacks:
+        - Retry with max_completion_tokens if max_tokens unsupported
+        - If chat endpoint missing (HTTP 404) on local LM Studio, fallback to /v1/completions with prompt
+        """
         try:
             return await self.http_client.post_async(url, json_data=payload, headers=headers, operation_type=operation_type)
         except Exception as e:
             msg = str(e)
+            # Token param fallback
             if "Unsupported parameter: 'max_tokens'" in msg or "max_tokens is not supported" in msg:
                 payload2 = dict(payload)
                 if "max_tokens" in payload2:
                     payload2.pop("max_tokens", None)
                     payload2["max_completion_tokens"] = 4000
                 return await self.http_client.post_async(url, json_data=payload2, headers=headers, operation_type=operation_type)
+            # LM Studio chat not available → use /v1/completions
+            if "HTTP 404" in msg and "/v1/chat/completions" in url and ("localhost" in url or "127.0.0.1" in url):
+                # Build a simple prompt from messages
+                messages = payload.get("messages") or []
+                parts = []
+                for m in messages:
+                    role = m.get("role", "user")
+                    content = m.get("content", "")
+                    parts.append(f"{role}: {content}")
+                prompt = "\n".join(parts) if parts else (payload.get("prompt") or "")
+                compl_payload = {
+                    "model": payload.get("model"),
+                    "prompt": prompt,
+                    "max_tokens": payload.get("max_tokens") or payload.get("max_completion_tokens") or 4000,
+                    "temperature": payload.get("temperature", 0.35),
+                }
+                compl_url = url.replace("/chat/completions", "/completions")
+                return await self.http_client.post_async(compl_url, json_data=compl_payload, headers=headers, operation_type=operation_type)
             raise
 
     async def _lmstudio_request_with_retry(self, prompt: str, temperature: float = 0.35, retries: int = 2, backoff: float = 0.5) -> str:
@@ -1831,9 +1855,16 @@ def handle_chat_with_tools(arguments, server):
                     )
                 elif "HTTP 404" in msg:
                     # Fallback to /v1/completions (instruct) when chat API not available
+                    # Build a simple prompt from messages
+                    parts = []
+                    for m in messages:
+                        role = m.get("role", "user")
+                        content_m = m.get("content", "")
+                        parts.append(f"{role}: {content_m}")
+                    prompt_text = "\n".join(parts)
                     compl_payload = {
                         "model": model,
-                        "prompt": transcript,
+                        "prompt": prompt_text,
                         "max_tokens": max_tokens,
                         "temperature": temperature,
                     }
@@ -1893,7 +1924,18 @@ def handle_chat_with_tools(arguments, server):
                     messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": err})
             # Continue loop to let the model use tool outputs
             continue
-        # No tool calls; return final content
+        # No tool calls; return final content (with helpful diagnostics if empty)
+        if not content:
+            diag = (
+                "Model returned no content. Possible causes: model without function-calling, empty reply, or blocked output. "
+                "Try a different model (e.g., claude-3-5-sonnet-latest), increase temperature slightly, or provide a more explicit instruction."
+            )
+            return {
+                "content": diag,
+                "transcript": transcript,
+                "model": model,
+                "tool_choice": tool_choice
+            }
         return {
             "content": content,
             "transcript": transcript,
@@ -2390,6 +2432,8 @@ def handle_tool_call(message):
             "artifact_create": (handle_artifact_create, True),
             "artifacts_list": (handle_artifacts_list, True),
             "session_analytics": (handle_session_analytics, True),
+            "router_config": (handle_router_config, True),
+            "cognitive_codegen_one_shot": (handle_cognitive_codegen_one_shot, True),
         }
 
 
@@ -4852,13 +4896,27 @@ def handle_health_check(arguments, server):
         try:
             lbase = os.getenv("LMSTUDIO_API_BASE", "http://localhost:1234/v1").rstrip("/")
             lmodel = os.getenv("LMSTUDIO_MODEL", os.getenv("MODEL_NAME", "openai/gpt-oss-20b"))
-            data = _http_client.post_sync(
-                f"{lbase}/chat/completions",
-                json_data={"model": lmodel, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 8},
-                headers={"Content-Type": "application/json"},
-                operation_type="simple"
-            )
-            providers["lmstudio"] = {"ok": True, "model": lmodel, "reply": (data.get("choices", [{}])[0].get("message", {}).get("content", "") or "")[:80]}
+            try:
+                data = _http_client.post_sync(
+                    f"{lbase}/chat/completions",
+                    json_data={"model": lmodel, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 8},
+                    headers={"Content-Type": "application/json"},
+                    operation_type="simple"
+                )
+                reply = (data.get("choices", [{}])[0].get("message", {}).get("content", "") or "")
+            except Exception as e1:
+                if "HTTP 404" in str(e1):
+                    # Fallback to /v1/completions
+                    compl = _http_client.post_sync(
+                        f"{lbase}/completions",
+                        json_data={"model": lmodel, "prompt": "hi", "max_tokens": 8},
+                        headers={"Content-Type": "application/json"},
+                        operation_type="simple"
+                    )
+                    reply = (compl.get("choices", [{}])[0].get("text", "") or "")
+                else:
+                    raise
+            providers["lmstudio"] = {"ok": True, "model": lmodel, "reply": reply[:80]}
         except Exception as e:
             providers["lmstudio"] = {"ok": False, "error": str(e)[:200]}
 
