@@ -21,6 +21,8 @@
         "SMART_PLAN_IMMEDIATE_TIMEOUT_SEC": "150",
         "ROUTER_BG_TIMEOUT_SEC": "300",
 
+        "PROACTIVE_RESEARCH_ENABLED": "1",
+
         "HTTP_CONNECT_TIMEOUT": "10",
         "HTTP_READ_TIMEOUT_SIMPLE": "60",
         "HTTP_READ_TIMEOUT_COMPLEX": "180",
@@ -30,9 +32,9 @@
         "METRICS_EXPORTER": "1",
         "METRICS_BIND": "127.0.0.1:9099",
 
-        "LMSTUDIO_FUNCTION_MODEL": "bytedance/seed-oss-36b",
+        "LMSTUDIO_FUNCTION_MODEL": "openai/gpt-oss-20b",
         "TOOLCALL_DEFAULT_TEMPERATURE": "0.15",
-        "TOOLCALL_TOOL_CHOICE_DEFAULT": "required",
+        "TOOLCALL_TOOL_CHOICE_DEFAULT": "auto",
 
         "OPENAI_MODEL": "gpt-4o-mini",
         "OPENAI_BASE_URL": "https://api.openai.com/v1",
