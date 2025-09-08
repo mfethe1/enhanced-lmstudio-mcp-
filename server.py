@@ -1924,8 +1924,48 @@ def handle_chat_with_tools(arguments, server):
                     messages.append({"role": "tool", "tool_call_id": tc.get("id"), "name": name, "content": err})
             # Continue loop to let the model use tool outputs
             continue
-        # No tool calls; return final content (with helpful diagnostics if empty)
+        # No tool calls; return final content (attempt Anthropic fallback if empty)
         if not content:
+            import os as _os
+            try:
+                akey = _os.getenv("ANTHROPIC_API_KEY")
+                if akey:
+                    abase = _os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1").rstrip("/")
+                    av = _os.getenv("ANTHROPIC_VERSION", "2023-06-01")
+                    amodel = _os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
+                    parts = []
+                    for m in messages:
+                        role = m.get("role", "user"); content_m = m.get("content", "")
+                        parts.append(f"{role}: {content_m}")
+                    prompt_text = "\n".join(parts)
+                    data_a = _http_client.post_sync(
+                        f"{abase}/messages",
+                        json_data={
+                            "model": amodel,
+                            "max_tokens": max(64, max_tokens),
+                            "messages": [{"role": "user", "content": prompt_text}]
+                        },
+                        headers={
+                            "x-api-key": akey,
+                            "anthropic-version": av,
+                            "content-type": "application/json"
+                        },
+                        operation_type="simple"
+                    )
+                    try:
+                        content_a = (data_a.get("content") or [{}])[0].get("text") or data_a.get("output_text") or ""
+                    except Exception:
+                        content_a = data_a.get("output_text") or ""
+                    if content_a.strip():
+                        return {
+                            "content": content_a.strip(),
+                            "transcript": transcript,
+                            "model": model,
+                            "tool_choice": tool_choice
+                        }
+            except Exception:
+                pass
+            # Helpful diagnostics if still empty
             diag = (
                 "Model returned no content. Possible causes: model without function-calling, empty reply, or blocked output. "
                 "Try a different model (e.g., claude-3-5-sonnet-latest), increase temperature slightly, or provide a more explicit instruction."
