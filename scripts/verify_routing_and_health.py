@@ -27,3 +27,23 @@ msg3 = {"params": {"name": "chat_with_tools", "arguments": {
 res3 = handle_tool_call(msg3)
 print("CHAT_WITH_TOOLS DIAG TEST:\n" + json.dumps(res3, indent=2) + "\n")
 
+
+# 4) chat_with_tools with tool_choice='required' and no tools to verify resilience
+msg4 = {"params": {"name": "chat_with_tools", "arguments": {
+  "instruction": "Summarize: hello world.",
+  "allowed_tools": [],
+  "tool_choice": "required",
+  "max_iters": 1,
+  "temperature": 0.1,
+  "max_tokens": 64
+}}}
+res4 = handle_tool_call(msg4)
+print("CHAT_WITH_TOOLS REQUIRED+NO-TOOLS TEST:\n" + json.dumps(res4, indent=2) + "\n")
+
+# 5) smart_task improves ambiguous selection for API-like instructions
+msg5 = {"params": {"name": "smart_task", "arguments": {
+  "instruction": "curl: curl -sS -X POST \"$GW/chemberta/predict\" -H \"Content-Type: application/json\" -d '{\"smiles\":\"CCO\"}'\nPowerShell: Invoke-RestMethod -Method POST -Uri \"$GW/chemberta/predict\" -ContentType 'application/json' -Body '{\"smiles\":\"CCO\"}'",
+  "dry_run": True
+}}}
+res5 = handle_tool_call(msg5)
+print("SMART_TASK API-LIKE INSTRUCTION TEST:\n" + json.dumps(res5, indent=2) + "\n")

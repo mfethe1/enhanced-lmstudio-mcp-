@@ -1817,16 +1817,28 @@ def handle_chat_with_tools(arguments, server):
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": instruction}]
     transcript = []
 
+    # Parameter consistency and preflight correction
+    has_tools = bool(tools)
+    safe_tool_choice = tool_choice
+    if safe_tool_choice == "required" and not has_tools:
+        # Auto-correct invalid combination: required tool choice but no tools
+        safe_tool_choice = "auto"
+        transcript.append({"note": "tool_choice corrected from 'required' to 'auto' because no tools were provided"})
+
     content = ""
     for _ in range(max(1, max_iters)):
         payload = {
             "model": model,
             "messages": messages,
-            "tools": tools,
-            "tool_choice": tool_choice,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if has_tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = safe_tool_choice
+        else:
+            # Do not send tools/tool_choice when none are available
+            payload["tool_choice"] = "none"
         if top_p is not None:
             payload["top_p"] = float(top_p)
 
@@ -1850,6 +1862,18 @@ def handle_chat_with_tools(arguments, server):
                     data = _http_client.post_sync(
                         f"{server.base_url}/v1/chat/completions",
                         json_data=payload2,
+                        headers={"Content-Type": "application/json"},
+                        operation_type="simple"
+                    )
+                elif "Tool choice 'required' must be specified with 'tools'" in msg:
+                    # Server rejected invalid combo; retry safely without tools and with tool_choice=auto
+                    transcript.append({"note": "retrying with tool_choice=auto due to 'required' + no tools error"})
+                    payload3 = dict(payload)
+                    payload3.pop("tools", None)
+                    payload3["tool_choice"] = "auto"
+                    data = _http_client.post_sync(
+                        f"{server.base_url}/v1/chat/completions",
+                        json_data=payload3,
                         headers={"Content-Type": "application/json"},
                         operation_type="simple"
                     )
@@ -3619,53 +3643,115 @@ def handle_smart_task(arguments, server):
             "recommendation": recommendation,
         })
 
-    # 2) If ambiguous, ask the router via LM Studio to select tool + args + confidence
+    # 2) If ambiguous, ask the router via LM Studio with structured output to select tool + args + confidence
     schemas = _get_tool_schemas()
     proposed_args = {}
     confidence = 0.0
     if not tool:
-        schema_hint = (
-            "Respond ONLY with compact JSON: "
-            "{\"tool\": <tool_name>, \"arguments\": {...}, \"confidence\": 0..1, \"rationale\": <short string>}"
+        tool_names = list(schemas.keys())
+        json_schema = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "smart_task_selection",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "tool": {"type": "string", "enum": tool_names},
+                        "arguments": {"type": "object"},
+                        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                        "rationale": {"type": "string"}
+                    },
+                    "required": ["tool", "confidence"]
+                }
+            }
+        }
+        sys_prompt = "You are a decisive function router. Return only JSON that conforms to the schema."
+        user_prompt = (
+            f"Instruction: {instruction}\n"
+            f"Context: {context}\n"
+            f"Known tools: {', '.join(tool_names)}\n"
+            f"Choose the single best tool, propose minimal arguments, and set confidence."
         )
-        prompt = (
-            f"You are a function router. Choose the best tool for the user's instruction and propose arguments.\n{schema_hint}\n"
-            f"Instruction: {instruction}\nContext: {context}\n"
-            f"Known tools: {', '.join(schemas.keys())}"
-        )
+        payload = {
+            "model": getattr(server, "model_name", None) or os.getenv("LMSTUDIO_MODEL", "openai/gpt-oss-20b"),
+            "messages": [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_prompt}],
+            "temperature": 0.0,
+            "max_tokens": 512,
+            "response_format": json_schema
+        }
         try:
-            raw = asyncio.get_event_loop().run_until_complete(server.route_chat(prompt, intent='routing', role='Router'))
-        except RuntimeError:
-            loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
-            raw = loop.run_until_complete(server.route_chat(prompt, intent='routing', role='Router')); loop.close()
-        try:
-            data = json.loads((raw or '').strip())
+            try:
+                data_resp = asyncio.get_event_loop().run_until_complete(
+                    server._post_chat_with_fallback(f"{server.base_url}/v1/chat/completions", payload, {"Content-Type": "application/json"}, "simple")
+                )
+            except RuntimeError:
+                loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
+                data_resp = loop.run_until_complete(
+                    server._post_chat_with_fallback(f"{server.base_url}/v1/chat/completions", payload, {"Content-Type": "application/json"}, "simple")
+                ); loop.close()
+            content = (((data_resp or {}).get("choices") or [{}])[0].get("message") or {}).get("content", "")
+            data = json.loads((content or "").strip()) if content else {}
             if isinstance(data, dict):
-                tool = data.get('tool') or tool
-                proposed_args = data.get('arguments') or {}
-                rationale = data.get('rationale') or rationale
+                tool = data.get("tool") or tool
+                proposed_args = data.get("arguments") or {}
+                rationale = data.get("rationale") or rationale
                 try:
-                    confidence = float(data.get('confidence') or 0.0)
+                    confidence = float(data.get("confidence") or 0.0)
                 except Exception:
                     confidence = 0.0
         except Exception:
-            pass
+            # fallback to previous freeform router if structured output fails
+            try:
+                raw = asyncio.get_event_loop().run_until_complete(server.route_chat(
+                    "You are a function router. Return JSON with keys: tool, arguments, confidence, rationale.\n"
+                    + f"Instruction: {instruction}\nContext: {context}\nKnown tools: {', '.join(tool_names)}",
+                    intent='routing', role='Router'))
+            except RuntimeError:
+                loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
+                raw = loop.run_until_complete(server.route_chat(
+                    "You are a function router. Return JSON with keys: tool, arguments, confidence, rationale.\n"
+                    + f"Instruction: {instruction}\nContext: {context}\nKnown tools: {', '.join(tool_names)}",
+                    intent='routing', role='Router')); loop.close()
+            try:
+                data = json.loads((raw or '').strip())
+                if isinstance(data, dict):
+                    tool = data.get('tool') or tool
+                    proposed_args = data.get('arguments') or {}
+                    rationale = data.get('rationale') or rationale
+                    try:
+                        confidence = float(data.get('confidence') or 0.0)
+                    except Exception:
+                        confidence = 0.0
+            except Exception:
+                pass
 
-    # 3) If still unknown, return options + insights + recommendation
-    if not tool:
-        recommendation = None
-        if insights is not None:
-            recommendation = {
-                "tool": "deep_research",
-                "arguments": {"query": instruction, "time_limit": 300, "max_depth": 2},
-                "reason": "Domain-specific context detected; initial research recommended to collect references and parameter defaults."
-            }
+    # 3) If still unknown or low confidence, choose best fallback and return helpful plan
+    if not tool or confidence < 0.4:
+        text_l = (instruction or "").lower()
+        def _fallback_select(t: str) -> str:
+            if any(k in t for k in ["curl", "invoke-restmethod", "http://", "https://", " api ", "predict", " -x post", " -x get", " post ", " get "]):
+                return "agent_team_plan_and_code"
+            if any(k in t for k in ["research", "survey", "compare", "latest", "find papers", "deep research"]):
+                return "deep_research"
+            if any(k in t for k in ["refactor", "cleanup", "modular", "optimiz", "restructure"]):
+                return "agent_team_refactor"
+            if any(k in t for k in ["test", "pytest", "unit test", "coverage", "assert"]):
+                return "agent_team_review_and_test"
+            return "agent_team_plan_and_code"
+        choice = _fallback_select(text_l)
+        recommendation = {
+            "tool": choice,
+            "arguments": {"instruction": instruction, "context": context},
+            "reason": "Heuristic fallback selection due to ambiguity or low confidence"
+        }
         return json.dumps({
-            "selected": None,
+            "selected": choice,
             "options": [r['tool'] for r in SMART_RULES],
-            "note": "ambiguous",
+            "note": "auto-selected (heuristic)",
             "insights": insights,
             "recommendation": recommendation,
+            "confidence": confidence
         })
 
     # 4) Schema-aware argument inference & validation + refinement loop
