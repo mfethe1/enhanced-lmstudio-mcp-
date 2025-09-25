@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "lmstudio-mcp": {
+    "strands": {
       "type": "stdio",
       "command": "py",
       "args": ["-3", "-u", "C:/Users/mfeth/.mcp-servers/lmstudio-mcp/server.py"],

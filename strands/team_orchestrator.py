@@ -106,12 +106,19 @@ class TeamOrchestrator:
         task_prompt = f"System: {sys_prompt}\nInstruction: {instruction}\nContext: {ctx_aug}"
 
         # If smart_plan_execute in tools, prefer it; else use smart_task for a single step
+        # Pass a curated allowed_tools list to bias tool selection when provided
+        tool_whitelist = [t for t in tools if t not in {"smart_task", "smart_plan_execute"}]
         if "smart_plan_execute" in tools:
             args = {"instruction": instruction, "context": context, "dry_run": self.config.dry_run, "max_steps": 4}
+            if tool_whitelist:
+                # Currently handle_smart_plan_execute does not use allowed_tools; keep for future compatibility
+                args["allowed_tools"] = tool_whitelist
             import server as _srvmod
             result = _srvmod.handle_smart_plan_execute(args, self.server)
         elif "smart_task" in tools:
             args = {"instruction": instruction, "context": context, "dry_run": True}
+            if tool_whitelist:
+                args["allowed_tools"] = tool_whitelist
             import server as _srvmod
             result = _srvmod.handle_smart_task(args, self.server)
         else:
