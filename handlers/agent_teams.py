@@ -59,8 +59,9 @@ def handle_agent_team_plan_and_code(arguments: Dict[str, Any], server) -> str:
     try:
         if os.getenv("AGENT_TEAM_FORCE_FALLBACK") == "1":
             raise RuntimeError("forced_fallback")
-        from crewai import Agent, Crew, Task  # type: ignore
-        base_kwargs = {"allow_delegation": False, "verbose": False}
+        from server import _import_crewai_any
+        Agent, Crew, Task = _import_crewai_any()
+        base_kwargs: dict[str, object] = {"allow_delegation": False, "verbose": False}
         # Per-role LLMs via router-aware helper
         planner_llm = _agent_llm_for_role("Planner")
         coder_llm = _agent_llm_for_role("Coder")
@@ -89,16 +90,19 @@ def handle_agent_team_plan_and_code(arguments: Dict[str, Any], server) -> str:
                 f"Context:\n{file_ctx}\n\n"
                 "1) A short plan; 2) Proposed diffs in fenced code; 3) Risks and mitigations."
             )
+            # Call class method so tests that monkeypatch it will intercept
+            from server import EnhancedLMStudioMCPServer, get_server_singleton
+            coro = EnhancedLMStudioMCPServer.make_llm_request_with_retry(get_server_singleton(), prompt, temperature=0.2)
             try:
-                resp = asyncio.get_event_loop().run_until_complete(server.route_chat(prompt, role='Planner', intent='agent_team', temperature=0.2))
+                resp = asyncio.get_event_loop().run_until_complete(coro)
             except RuntimeError:
                 loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
-                resp = loop.run_until_complete(server.route_chat(prompt, role='Planner', intent='agent_team', temperature=0.2)); loop.close()
+                resp = loop.run_until_complete(coro); loop.close()
         except Exception as e2:
             resp = f"Error synthesizing plan: {e}; fallback failed: {e2}"
         if apply_changes:
             from server import _apply_proposed_changes
-            applied = _apply_proposed_changes(resp)
+            applied = _apply_proposed_changes(resp, dry_run=False)
             resp += "\n\n[Applied changes]\n" + "\n".join(applied)
     return _compact_text(resp, max_chars=4000)
 
@@ -113,8 +117,9 @@ def handle_agent_team_review_and_test(arguments: Dict[str, Any], server) -> str:
     test_command = (arguments.get("test_command") or "pytest")
 
     try:
-        from crewai import Agent, Crew, Task  # type: ignore
-        base_kwargs = {"allow_delegation": False, "verbose": False}
+        from server import _import_crewai_any
+        Agent, Crew, Task = _import_crewai_any()
+        base_kwargs: dict[str, object] = {"allow_delegation": False, "verbose": False}
         reviewer_llm = _agent_llm_for_role("Reviewer")
         qa_llm = _agent_llm_for_role("QA")
         if reviewer_llm: base_kwargs_reviewer = {**base_kwargs, "llm": reviewer_llm}
@@ -134,11 +139,13 @@ def handle_agent_team_review_and_test(arguments: Dict[str, Any], server) -> str:
                 f"Review the following diff and propose fixes. Then outline test steps for: {test_command}.\n\n"
                 f"Context:\n{context}\n\nDiff:\n{diff}"
             )
+            from server import EnhancedLMStudioMCPServer, get_server_singleton
+            coro = EnhancedLMStudioMCPServer.make_llm_request_with_retry(get_server_singleton(), prompt, temperature=0.2)
             try:
-                resp = asyncio.get_event_loop().run_until_complete(server.route_chat(prompt, role='Reviewer', intent='agent_team', temperature=0.2))
+                resp = asyncio.get_event_loop().run_until_complete(coro)
             except RuntimeError:
                 loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
-                resp = loop.run_until_complete(server.route_chat(prompt, role='Reviewer', intent='agent_team', temperature=0.2)); loop.close()
+                resp = loop.run_until_complete(coro); loop.close()
         except Exception as e2:
             resp = f"Error synthesizing review: {e}; fallback failed: {e2}"
     return _compact_text(resp, max_chars=4000)
@@ -173,11 +180,13 @@ def handle_agent_team_refactor(arguments: Dict[str, Any], server) -> str:
             prompt = (
                 f"Refactor goals: {goals}. Provide rationale and refactored code.\n\nCurrent content (truncated):\n{content}"
             )
+            from server import EnhancedLMStudioMCPServer, get_server_singleton
+            coro = EnhancedLMStudioMCPServer.make_llm_request_with_retry(get_server_singleton(), prompt, temperature=0.2)
             try:
-                out = asyncio.get_event_loop().run_until_complete(server.route_chat(prompt, role='Refactorer', intent='agent_team', temperature=0.2))
+                out = asyncio.get_event_loop().run_until_complete(coro)
             except RuntimeError:
                 loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
-                out = loop.run_until_complete(server.route_chat(prompt, role='Refactorer', intent='agent_team', temperature=0.2)); loop.close()
+                out = loop.run_until_complete(coro); loop.close()
             return _compact_text(out, max_chars=4000)
         except Exception as e2:
             return _compact_text(f"Error: {e}; fallback failed: {e2}", max_chars=4000)

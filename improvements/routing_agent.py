@@ -146,62 +146,53 @@ class EnhancedRoutingMixin:
         max_tokens = int(os.getenv("ROUTER_MAX_TOKENS", "2000"))
         
         if backend_lower == "openai" and os.getenv("OPENAI_API_KEY"):
-            import requests
+            from server import _http_client
             base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
             model = model_override or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-            
-            r = requests.post(
+
+            data = _http_client.post_sync(
                 f"{base}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}",
-                    "Content-Type": "application/json"
-                },
-                json={
+                json_data={
                     "model": model,
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": temperature,
                     "max_tokens": max_tokens
                 },
-                timeout=(30, 120)
+                headers={
+                    "Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}",
+                    "Content-Type": "application/json"
+                },
+                operation_type="simple"
             )
-            
-            if r.status_code == 200:
-                data = r.json()
-                return _sanitize_llm_output(
-                    data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                )
-            else:
-                raise Exception(f"OpenAI error {r.status_code}: {r.text[:200]}")
+            return _sanitize_llm_output(
+                data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            )
                 
         elif backend_lower == "anthropic" and os.getenv("ANTHROPIC_API_KEY"):
-            import requests
+            from server import _http_client
             base = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1")
             model = model_override or os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20240620")
-            
-            r = requests.post(
+
+            data = _http_client.post_sync(
                 f"{base}/messages",
-                headers={
-                    "x-api-key": os.getenv("ANTHROPIC_API_KEY"),
-                    "anthropic-version": os.getenv("ANTHROPIC_VERSION", "2023-06-01"),
-                    "content-type": "application/json",
-                },
-                json={
+                json_data={
                     "model": model,
                     "max_tokens": max_tokens,
                     "temperature": temperature,
                     "messages": [{"role": "user", "content": prompt}]
                 },
-                timeout=(30, 120)
+                headers={
+                    "x-api-key": os.getenv("ANTHROPIC_API_KEY"),
+                    "anthropic-version": os.getenv("ANTHROPIC_VERSION", "2023-06-01"),
+                    "content-type": "application/json",
+                },
+                operation_type="simple"
             )
-            
-            if r.status_code == 200:
-                data = r.json()
-                parts = data.get("content", [])
-                if parts and isinstance(parts, list):
-                    txt = "".join([p.get("text", "") for p in parts if isinstance(p, dict)])
-                    return _sanitize_llm_output(txt)
-            else:
-                raise Exception(f"Anthropic error {r.status_code}: {r.text[:200]}")
+            parts = data.get("content", [])
+            if parts and isinstance(parts, list):
+                txt = "".join([p.get("text", "") for p in parts if isinstance(p, dict)])
+                return _sanitize_llm_output(txt)
+            return _sanitize_llm_output("")
                 
         else:
             # LMStudio/local backend
