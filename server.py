@@ -1470,7 +1470,7 @@ def handle_message(message):
                         "tools": {"listChanged": True}
                     },
                     "serverInfo": {
-                        "name": "strands",
+                        "name": "jarvis",
                         "version": "2.1.0"
                     }
                 }
@@ -5447,7 +5447,7 @@ def handle_router_config(arguments, server):
     return cfg
 def handle_get_version(arguments, server):
     return {
-        "name": "strands",
+        "name": "jarvis",
         "version": "2.1.0",
         "lm_studio_url": server.base_url,
         "model": server.model_name,
