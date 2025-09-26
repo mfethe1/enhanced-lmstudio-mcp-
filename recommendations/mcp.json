@@ -42,6 +42,7 @@
         "TOOLCALL_TOOL_CHOICE_DEFAULT": "auto",
 
         "OPENAI_MODEL": "gpt-4o",
+        "OPENAI_FALLBACK_MODEL": "gpt-4o",
         "OPENAI_API_BASE": "https://api.openai.com/v1",
 
         "OPENAI_BASE_URL": "https://api.openai.com/v1",
@@ -54,7 +55,7 @@
         "OPUS_FOR_ANALYSIS": "1",
         "OPUS_FOR_LOW_CONF": "1",
         "LOW_CONF_THRESHOLD": "0.5",
-        "ANTHROPIC_MODEL_COMPLEX": "claude-3-opus-latest",
+        "ANTHROPIC_MODEL_COMPLEX": "claude-3-5-sonnet-latest",
 
         "USE_HYBRID_RETRIEVAL": "1",
         "ENABLE_KG_INGESTION": "1",
