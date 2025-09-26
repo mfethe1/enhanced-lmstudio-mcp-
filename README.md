@@ -198,12 +198,32 @@ Example (JSON-RPC tools/call):
 1. **Install dependencies:**
    ```bash
    pip install -r requirements.txt
+   pip install boto3  # For Amazon Bedrock support (optional)
    ```
 
-2. **Configure environment variables (optional):**
+2. **Configure environment variables:**
+   Create `.secrets/.env.local` with your API keys:
    ```bash
-   export LM_STUDIO_URL="http://localhost:1234"
-   export MODEL_NAME="deepseek-r1-distill-qwen-7b"
+   # LM Studio (local models)
+   LMSTUDIO_API_BASE=http://localhost:1234/v1
+   LMSTUDIO_MODEL=deepseek-r1-distill-qwen-7b
+
+   # OpenAI (optional)
+   OPENAI_API_KEY=your_openai_key
+   OPENAI_MODEL=gpt-4o
+   OPENAI_FALLBACK_MODEL=gpt-4o
+
+   # Anthropic (optional - direct API)
+   ANTHROPIC_API_KEY=your_anthropic_key
+   ANTHROPIC_MODEL=claude-3-5-sonnet-latest
+   ANTHROPIC_MODEL_COMPLEX=claude-3-5-sonnet-latest
+   ANTHROPIC_MODEL_OVERSEER=claude-3-opus-latest
+
+   # Amazon Bedrock (optional - for Claude via AWS)
+   USE_BEDROCK=0  # Set to 1 to enable
+   BEDROCK_REGION=us-east-1
+   AWS_ACCESS_KEY_ID=your_aws_key
+   AWS_SECRET_ACCESS_KEY=your_aws_secret
    ```
 
 3. **Start the MCP server:**
@@ -222,6 +242,18 @@ The server can be configured through environment variables:
 - `USE_HYBRID_RETRIEVAL=1` - Enable intelligent query routing and hybrid retrieval (default: 1)
 - `ENABLE_KG_INGESTION=1` - Capture agent interactions in knowledge graph (default: 1)
 - `ENABLE_WEB_AUGMENTATION=1` - Use Firecrawl for real-time web research (default: 1)
+
+#### Amazon Bedrock Integration
+- `USE_BEDROCK=1` - Route Anthropic requests through AWS Bedrock (default: 0)
+- `BEDROCK_REGION=us-east-1` - AWS region for Bedrock (default: us-east-1)
+- `AWS_ACCESS_KEY_ID` - AWS access key for Bedrock authentication
+- `AWS_SECRET_ACCESS_KEY` - AWS secret key for Bedrock authentication
+
+**Benefits of Bedrock Integration:**
+- Access to latest Claude models via AWS infrastructure
+- Enterprise-grade security and compliance
+- Potential cost optimization for high-volume usage
+- Regional data residency options
 - `LOW_CONF_THRESHOLD=0.3` - Router confidence threshold for fallback strategies
 - `OPUS_FOR_ANALYSIS=1` - Use Claude Opus for complex business analysis tasks
 
