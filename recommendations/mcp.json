@@ -59,7 +59,10 @@
 
         "USE_HYBRID_RETRIEVAL": "1",
         "ENABLE_KG_INGESTION": "1",
-        "ENABLE_WEB_AUGMENTATION": "1"
+        "ENABLE_WEB_AUGMENTATION": "1",
+
+        "USE_BEDROCK": "0",
+        "BEDROCK_REGION": "us-east-1"
       }
     }
   }

@@ -32,6 +32,15 @@ from enhanced_agent_teams import decide_backend_for_role as _enh_decide_backend_
 from enhanced_mcp_tools import merged_tools as _merged_tools
 from audit_logger import ImmutableAuditLogger, AuditLevel, ActionType, ComplianceRule, AttorneyStyleReviewer
 from workflow_composer import WorkflowComposer
+
+# Import Bedrock adapter
+try:
+    from bedrock_adapter import bedrock_adapter
+    BEDROCK_AVAILABLE = True
+except ImportError as e:
+    logging.warning(f"Bedrock adapter not available: {e}")
+    bedrock_adapter = None
+    BEDROCK_AVAILABLE = False
 # --- Lightweight background task helpers ---
 import threading
 from uuid import uuid4 as _uuid4
@@ -1295,7 +1304,7 @@ class EnhancedLMStudioMCPServer:
                     logger.warning("OpenAI error: %s", str(e)[:200])
                     decision.update({"latency_ms": int((time.time()-t0)*1000), "success": False, "error": str(e)[:100]})
                     self._router_log.append(decision); self._router_log[:] = self._router_log[-200:]
-            if backend == "anthropic" and os.getenv("ANTHROPIC_API_KEY"):
+            if backend == "anthropic" and (os.getenv("ANTHROPIC_API_KEY") or (BEDROCK_AVAILABLE and os.getenv("USE_BEDROCK", "false").lower() in {"true", "1", "yes", "on"})):
                 await self._router_wait("anthropic")
                 base = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1")
                 default_model = (model_override or os.getenv("ANTHROPIC_MODEL", "claude-4-sonnet"))
@@ -1307,29 +1316,51 @@ class EnhancedLMStudioMCPServer:
                 model = _select_anthropic_model(role, intent, complexity, prompt, agent_conf, default_model) if not model_override else default_model
                 decision["model"] = model
 
-                # Use enhanced HTTP client with adaptive timeout
-                operation_type = "complex" if len(prompt) > 2000 else "simple"
-                try:
-                    response_data = await self.http_client.post_async(
-                        f"{base}/messages",
-                        json_data={"model": model, "max_tokens": max_tokens, "temperature": temperature, "messages": [{"role": "user", "content": prompt}]},
-                        headers={
-                            "x-api-key": os.getenv("ANTHROPIC_API_KEY"),
-                            "anthropic-version": os.getenv("ANTHROPIC_VERSION", "2023-06-01"),
-                            "content-type": "application/json",
-                        },
-                        operation_type=operation_type
-                    )
-                    parts = response_data.get("content", [])
-                    txt = "".join([p.get("text", "") for p in parts if isinstance(p, dict)])
-                    out = _sanitize_llm_output(txt)
-                    decision.update({"latency_ms": int((time.time()-t0)*1000), "success": True})
-                    self._router_log.append(decision); self._router_log[:] = self._router_log[-200:]
-                    return out
-                except Exception as e:
-                    logger.warning("Anthropic error: %s", str(e)[:200])
-                    decision.update({"latency_ms": int((time.time()-t0)*1000), "success": False, "error": str(e)[:100]})
-                    self._router_log.append(decision); self._router_log[:] = self._router_log[-200:]
+                # Try Bedrock first if enabled and available
+                use_bedrock = os.getenv("USE_BEDROCK", "false").lower() in {"true", "1", "yes", "on"}
+                if use_bedrock and BEDROCK_AVAILABLE and bedrock_adapter.is_available():
+                    try:
+                        bedrock_messages = [{"role": "user", "content": prompt}]
+                        response_data = await bedrock_adapter.achat_completion(
+                            model=model,
+                            messages=bedrock_messages,
+                            temperature=temperature,
+                            max_tokens=max_tokens
+                        )
+                        if response_data and "choices" in response_data:
+                            parts = [{"text": response_data["choices"][0]["message"]["content"]}]
+                            out = parts[0].get("text", "").strip()
+                            if out:
+                                decision.update({"latency_ms": int((time.time()-t0)*1000), "success": True})
+                                self._router_log.append(decision); self._router_log[:] = self._router_log[-200:]
+                                return out
+                    except Exception as e:
+                        logger.warning(f"Bedrock request failed, falling back to direct API: {e}")
+
+                # Fallback to direct Anthropic API
+                if os.getenv("ANTHROPIC_API_KEY"):
+                    operation_type = "complex" if len(prompt) > 2000 else "simple"
+                    try:
+                        response_data = await self.http_client.post_async(
+                            f"{base}/messages",
+                            json_data={"model": model, "max_tokens": max_tokens, "temperature": temperature, "messages": [{"role": "user", "content": prompt}]},
+                            headers={
+                                "x-api-key": os.getenv("ANTHROPIC_API_KEY"),
+                                "anthropic-version": os.getenv("ANTHROPIC_VERSION", "2023-06-01"),
+                                "content-type": "application/json",
+                            },
+                            operation_type=operation_type
+                        )
+                        parts = response_data.get("content", [])
+                        txt = "".join([p.get("text", "") for p in parts if isinstance(p, dict)])
+                        out = _sanitize_llm_output(txt)
+                        decision.update({"latency_ms": int((time.time()-t0)*1000), "success": True})
+                        self._router_log.append(decision); self._router_log[:] = self._router_log[-200:]
+                        return out
+                    except Exception as e:
+                        logger.warning("Anthropic error: %s", str(e)[:200])
+                        decision.update({"latency_ms": int((time.time()-t0)*1000), "success": False, "error": str(e)[:100]})
+                        self._router_log.append(decision); self._router_log[:] = self._router_log[-200:]
             # Default LM Studio
             await self._router_wait("lmstudio")
             out = await self._lmstudio_request_with_retry(prompt, temperature=temperature)
@@ -4795,9 +4826,16 @@ def _build_llm_for_backend(backend: str):
             key = os.getenv("ANTHROPIC_API_KEY", "").strip()
             base = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1")
             model = os.getenv("ANTHROPIC_MODEL", "claude-4-sonnet")
-            if not key:
+
+            # Check if Bedrock should be used
+            use_bedrock = os.getenv("USE_BEDROCK", "false").lower() in {"true", "1", "yes", "on"}
+            if use_bedrock and BEDROCK_AVAILABLE and bedrock_adapter.is_available():
+                # For Bedrock, we don't need API key but need AWS credentials
+                return LLM(model=model, api_key="bedrock", base_url="bedrock", temperature=0.2)
+            elif key:
+                return LLM(model=model, api_key=key, base_url=base, temperature=0.2)
+            else:
                 return None
-            return LLM(model=model, api_key=key, base_url=base, temperature=0.2)
         # default lmstudio
         base = os.getenv("OPENAI_API_BASE", "http://localhost:1234/v1")
         key = os.getenv("OPENAI_API_KEY", "sk-noauth")
@@ -5393,6 +5431,9 @@ def handle_router_config(arguments, server):
             "opus_for_low_conf": os.getenv("OPUS_FOR_LOW_CONF", "0"),
             "low_conf_threshold": os.getenv("LOW_CONF_THRESHOLD", "0.5"),
             "use_opus_for_overseer": os.getenv("OVERSEER_USE_OPUS", "0"),
+            "use_bedrock": os.getenv("USE_BEDROCK", "0"),
+            "bedrock_region": os.getenv("BEDROCK_REGION", "us-east-1"),
+            "bedrock_available": BEDROCK_AVAILABLE and (bedrock_adapter.is_available() if bedrock_adapter else False),
         },
         "openai": {
             "model_default": os.getenv("OPENAI_MODEL", ""),
