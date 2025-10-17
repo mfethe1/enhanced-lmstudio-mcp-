@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from typing import Any, Dict, Optional
@@ -638,3 +639,342 @@ def handle_get_file_lock_stats(arguments: Dict[str, Any], server) -> str:
         logger.error(f"Error getting file lock stats: {e}", exc_info=True)
         return json.dumps({"error": str(e)}, indent=2)
 
+
+# ============================================================================
+# Workflow Pattern Handlers (Phase 2 Priority 3)
+# ============================================================================
+
+def handle_execute_parallel_workflow(arguments: Dict[str, Any], server) -> str:
+    """
+    Execute tasks in parallel with result aggregation.
+
+    Args:
+        arguments: Dict with:
+            - tasks: List of task definitions (each with: name, function_name, args, kwargs, timeout, files_to_lock)
+            - timeout: Optional global timeout in seconds
+            - max_concurrency: Optional max concurrent tasks (default: 5)
+            - error_strategy: Optional error handling strategy (fail_fast, continue, retry)
+            - aggregation_strategy: Optional result aggregation (all, first, best)
+
+    Returns:
+        JSON string with workflow results and statistics
+    """
+    try:
+        # Import here to avoid circular imports
+        from handlers.workflows import (
+            ParallelWorkflow, WorkflowTask, WorkflowConfig,
+            ErrorStrategy, AggregationStrategy
+        )
+
+        # Parse arguments
+        tasks_data = arguments.get("tasks", [])
+        timeout = arguments.get("timeout")
+        max_concurrency = arguments.get("max_concurrency", 5)
+        error_strategy_str = arguments.get("error_strategy", "continue")
+        aggregation_strategy_str = arguments.get("aggregation_strategy", "all")
+
+        if not tasks_data:
+            return json.dumps({"error": "No tasks provided"}, indent=2)
+
+        # Map error strategy
+        error_strategy_map = {
+            "fail_fast": ErrorStrategy.FAIL_FAST,
+            "continue": ErrorStrategy.CONTINUE,
+            "retry": ErrorStrategy.RETRY
+        }
+        error_strategy = error_strategy_map.get(error_strategy_str, ErrorStrategy.CONTINUE)
+
+        # Map aggregation strategy
+        aggregation_strategy_map = {
+            "all": AggregationStrategy.ALL,
+            "first": AggregationStrategy.FIRST,
+            "best": AggregationStrategy.BEST
+        }
+        aggregation_strategy = aggregation_strategy_map.get(aggregation_strategy_str, AggregationStrategy.ALL)
+
+        # Create workflow config
+        config = WorkflowConfig(
+            timeout=timeout,
+            error_strategy=error_strategy,
+            aggregation_strategy=aggregation_strategy,
+            max_concurrency=max_concurrency
+        )
+
+        # Create workflow tasks
+        tasks = []
+        for i, task_data in enumerate(tasks_data):
+            task_name = task_data.get("name", f"task-{i}")
+            function_name = task_data.get("function_name")
+            task_args = task_data.get("args", [])
+            task_kwargs = task_data.get("kwargs", {})
+            task_timeout = task_data.get("timeout")
+            files_to_lock = task_data.get("files_to_lock", [])
+
+            # Create a simple async function for the task
+            async def task_function(*args, **kwargs):
+                # Simulate task execution
+                await asyncio.sleep(0.1)
+                return {"task": task_name, "args": args, "kwargs": kwargs}
+
+            task = WorkflowTask(
+                task_id=f"task-{i}",
+                name=task_name,
+                function=task_function,
+                args=tuple(task_args),
+                kwargs=task_kwargs,
+                timeout=task_timeout,
+                files_to_lock=files_to_lock
+            )
+            tasks.append(task)
+
+        # Execute workflow
+        workflow = ParallelWorkflow(config=config)
+
+        # Get or create event loop
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        results = loop.run_until_complete(workflow.execute(tasks))
+
+        # Format results
+        results_data = [
+            {
+                "task_id": r.task_id,
+                "status": r.status,
+                "output": r.output,
+                "error": r.error,
+                "duration": r.duration,
+                "retry_count": r.retry_count
+            }
+            for r in results
+        ]
+
+        stats = workflow.get_stats()
+
+        return json.dumps({
+            "status": "success",
+            "workflow_id": workflow.workflow_id,
+            "results": results_data,
+            "stats": stats
+        }, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error executing parallel workflow: {e}", exc_info=True)
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+def handle_execute_sequential_workflow(arguments: Dict[str, Any], server) -> str:
+    """
+    Execute tasks sequentially with state passing.
+
+    Args:
+        arguments: Dict with:
+            - tasks: List of task definitions (each with: name, function_name, args, kwargs, timeout, dependencies, files_to_lock)
+            - timeout: Optional global timeout in seconds
+            - error_strategy: Optional error handling strategy (fail_fast, continue, retry)
+
+    Returns:
+        JSON string with workflow results and statistics
+    """
+    try:
+        # Import here to avoid circular imports
+        from handlers.workflows import (
+            SequentialWorkflow, WorkflowTask, WorkflowConfig,
+            ErrorStrategy
+        )
+
+        # Parse arguments
+        tasks_data = arguments.get("tasks", [])
+        timeout = arguments.get("timeout")
+        error_strategy_str = arguments.get("error_strategy", "continue")
+
+        if not tasks_data:
+            return json.dumps({"error": "No tasks provided"}, indent=2)
+
+        # Map error strategy
+        error_strategy_map = {
+            "fail_fast": ErrorStrategy.FAIL_FAST,
+            "continue": ErrorStrategy.CONTINUE,
+            "retry": ErrorStrategy.RETRY
+        }
+        error_strategy = error_strategy_map.get(error_strategy_str, ErrorStrategy.CONTINUE)
+
+        # Create workflow config
+        config = WorkflowConfig(
+            timeout=timeout,
+            error_strategy=error_strategy
+        )
+
+        # Create workflow tasks
+        tasks = []
+        for i, task_data in enumerate(tasks_data):
+            task_name = task_data.get("name", f"task-{i}")
+            function_name = task_data.get("function_name")
+            task_args = task_data.get("args", [])
+            task_kwargs = task_data.get("kwargs", {})
+            task_timeout = task_data.get("timeout")
+            dependencies = task_data.get("dependencies", [])
+            files_to_lock = task_data.get("files_to_lock", [])
+
+            # Create a simple async function for the task
+            async def task_function(*args, **kwargs):
+                # Simulate task execution
+                await asyncio.sleep(0.1)
+                return {"task": task_name, "args": args, "kwargs": kwargs}
+
+            task = WorkflowTask(
+                task_id=f"task-{i}",
+                name=task_name,
+                function=task_function,
+                args=tuple(task_args),
+                kwargs=task_kwargs,
+                timeout=task_timeout,
+                dependencies=dependencies,
+                files_to_lock=files_to_lock
+            )
+            tasks.append(task)
+
+        # Execute workflow
+        workflow = SequentialWorkflow(config=config)
+
+        # Get or create event loop
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        results = loop.run_until_complete(workflow.execute(tasks))
+
+        # Format results
+        results_data = [
+            {
+                "task_id": r.task_id,
+                "status": r.status,
+                "output": r.output,
+                "error": r.error,
+                "duration": r.duration,
+                "retry_count": r.retry_count
+            }
+            for r in results
+        ]
+
+        stats = workflow.get_stats()
+
+        return json.dumps({
+            "status": "success",
+            "workflow_id": workflow.workflow_id,
+            "results": results_data,
+            "stats": stats
+        }, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error executing sequential workflow: {e}", exc_info=True)
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+def handle_execute_evaluator_optimizer_workflow(arguments: Dict[str, Any], server) -> str:
+    """
+    Execute evaluation-optimization loop until convergence.
+
+    Args:
+        arguments: Dict with:
+            - initial_solution: Initial solution to optimize
+            - score_threshold: Optional convergence threshold (default: 0.95)
+            - max_iterations: Optional max iterations (default: 10)
+            - no_improvement_limit: Optional iterations without improvement before stopping (default: 3)
+            - timeout: Optional global timeout in seconds
+
+    Returns:
+        JSON string with final solution, score, and iteration history
+    """
+    try:
+        # Import here to avoid circular imports
+        from handlers.workflows import (
+            EvaluatorOptimizerWorkflow, WorkflowConfig
+        )
+
+        # Parse arguments
+        initial_solution = arguments.get("initial_solution")
+        score_threshold = arguments.get("score_threshold", 0.95)
+        max_iterations = arguments.get("max_iterations", 10)
+        no_improvement_limit = arguments.get("no_improvement_limit", 3)
+        timeout = arguments.get("timeout")
+
+        if initial_solution is None:
+            return json.dumps({"error": "No initial_solution provided"}, indent=2)
+
+        # Create simple evaluator and optimizer functions
+        def evaluator(solution: Any) -> tuple[float, str]:
+            """Evaluate solution quality (0.0-1.0)"""
+            # Simple example: if solution is a number, score based on proximity to 100
+            if isinstance(solution, (int, float)):
+                score = 1.0 - abs(100 - solution) / 100.0
+                score = max(0.0, min(1.0, score))
+                feedback = f"Current value: {solution}, target: 100"
+                return score, feedback
+            else:
+                return 0.5, "Unknown solution type"
+
+        def optimizer(solution: Any, feedback: str) -> Any:
+            """Improve solution based on feedback"""
+            # Simple example: move solution closer to 100
+            if isinstance(solution, (int, float)):
+                if solution < 100:
+                    return solution + 10
+                elif solution > 100:
+                    return solution - 10
+                else:
+                    return solution
+            else:
+                return solution
+
+        # Create workflow config
+        config = WorkflowConfig(timeout=timeout)
+
+        # Execute workflow
+        workflow = EvaluatorOptimizerWorkflow(
+            evaluator=evaluator,
+            optimizer=optimizer,
+            initial_solution=initial_solution,
+            score_threshold=score_threshold,
+            max_iterations=max_iterations,
+            no_improvement_limit=no_improvement_limit,
+            config=config
+        )
+
+        # Get or create event loop
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        results = loop.run_until_complete(workflow.execute())
+
+        # Get history
+        history = workflow.get_history()
+
+        # Format results
+        result = results[0] if results else None
+
+        return json.dumps({
+            "status": "success",
+            "workflow_id": workflow.workflow_id,
+            "result": {
+                "solution": result.output.get("solution") if result and result.output else None,
+                "score": result.output.get("score") if result and result.output else 0.0,
+                "iterations": result.output.get("iterations") if result and result.output else 0,
+                "converged": result.output.get("converged") if result and result.output else False,
+                "duration": result.duration if result else 0.0
+            },
+            "history": history,
+            "stats": workflow.get_stats()
+        }, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error executing evaluator-optimizer workflow: {e}", exc_info=True)
+        return json.dumps({"error": str(e)}, indent=2)

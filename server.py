@@ -491,6 +491,10 @@ def _register_all_handlers(server):
     server.registry.register("acquire_file_lock", agent_teams.handle_acquire_file_lock, needs_server=True)
     server.registry.register("release_file_lock", agent_teams.handle_release_file_lock, needs_server=True)
     server.registry.register("get_file_lock_stats", agent_teams.handle_get_file_lock_stats, needs_server=True)
+    # Workflow pattern handlers (Phase 2 Priority 3)
+    server.registry.register("execute_parallel_workflow", agent_teams.handle_execute_parallel_workflow, needs_server=True)
+    server.registry.register("execute_sequential_workflow", agent_teams.handle_execute_sequential_workflow, needs_server=True)
+    server.registry.register("execute_evaluator_optimizer_workflow", agent_teams.handle_execute_evaluator_optimizer_workflow, needs_server=True)
     # Memory handlers
     server.registry.register("store_memory", memory.handle_memory_store, needs_server=True)
     server.registry.register("retrieve_memory", memory.handle_memory_retrieve, needs_server=True)
