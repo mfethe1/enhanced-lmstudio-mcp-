@@ -467,7 +467,7 @@ except Exception as e:
 def _register_all_handlers(server):
     """Register all modular handlers with the registry"""
     try:
-        from handlers import research, agent_teams, memory, code_tools, workflow, audit
+        from handlers import research, agent_teams, memory, code_tools, workflow, audit, swarm
     except Exception:
         return
     if getattr(server, "registry", None) is None:
@@ -495,6 +495,11 @@ def _register_all_handlers(server):
     server.registry.register("execute_parallel_workflow", agent_teams.handle_execute_parallel_workflow, needs_server=True)
     server.registry.register("execute_sequential_workflow", agent_teams.handle_execute_sequential_workflow, needs_server=True)
     server.registry.register("execute_evaluator_optimizer_workflow", agent_teams.handle_execute_evaluator_optimizer_workflow, needs_server=True)
+    # Swarm pattern handlers (Phase 2 Priority 4)
+    server.registry.register("create_swarm", swarm.handle_create_swarm, needs_server=True)
+    server.registry.register("execute_swarm_task", swarm.handle_execute_swarm_task, needs_server=True)
+    server.registry.register("get_swarm_status", swarm.handle_get_swarm_status, needs_server=True)
+    server.registry.register("visualize_swarm", swarm.handle_visualize_swarm, needs_server=True)
     # Memory handlers
     server.registry.register("store_memory", memory.handle_memory_store, needs_server=True)
     server.registry.register("retrieve_memory", memory.handle_memory_retrieve, needs_server=True)
