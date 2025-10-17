@@ -27,6 +27,18 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+# Import agentic task management system
+try:
+    from task_manager import TaskManager
+    from agentic_handlers import AgenticToolHandlers
+    AGENTIC_AVAILABLE = True
+    logging.info("Agentic task management system loaded successfully")
+except ImportError as e:
+    TaskManager = None
+    AgenticToolHandlers = None
+    AGENTIC_AVAILABLE = False
+    logging.warning(f"Agentic task management not available: {e}")
+
 # Enhanced modular components
 from enhanced_agent_teams import decide_backend_for_role as _enh_decide_backend_for_role  # delegate to enhanced module
 from enhanced_mcp_tools import merged_tools as _merged_tools
@@ -216,9 +228,18 @@ class CircuitBreaker:
 
 # Global circuit breakers for different services
 _circuit_breakers = {
-    "lmstudio": CircuitBreaker(failure_threshold=3, recovery_timeout=30.0),
-    "openai": CircuitBreaker(failure_threshold=5, recovery_timeout=60.0),
-    "anthropic": CircuitBreaker(failure_threshold=5, recovery_timeout=60.0),
+    "lmstudio": CircuitBreaker(
+        failure_threshold=int(os.getenv("CIRCUIT_LMSTUDIO_THRESHOLD", "8")),
+        recovery_timeout=float(os.getenv("CIRCUIT_LMSTUDIO_RECOVERY", "120"))
+    ),
+    "openai": CircuitBreaker(
+        failure_threshold=int(os.getenv("CIRCUIT_OPENAI_THRESHOLD", "5")),
+        recovery_timeout=float(os.getenv("CIRCUIT_OPENAI_RECOVERY", "60"))
+    ),
+    "anthropic": CircuitBreaker(
+        failure_threshold=int(os.getenv("CIRCUIT_ANTHROPIC_THRESHOLD", "5")),
+        recovery_timeout=float(os.getenv("CIRCUIT_ANTHROPIC_RECOVERY", "60"))
+    ),
 }
 
 def _run_enhanced_plan_background(server, instruction: str, context: str, max_steps: int, task_id: str):
@@ -398,6 +419,36 @@ def get_server_singleton():
                 logger.info("Model monitoring started")
         except Exception as _e:
             logger.warning("Proactive research orchestrator unavailable: %s", _e)
+
+    # Initialize registry handlers after all functions are defined
+    try:
+        if getattr(_server_singleton, 'registry', None) is not None:
+            _register_all_handlers(_server_singleton)
+            # Register late handlers directly here (functions defined later in file)
+            try:
+                _server_singleton.registry.register("health_check", handle_health_check, needs_server=True)
+                _server_singleton.registry.register("get_version", handle_get_version, needs_server=True)
+                _server_singleton.registry.register("router_config", handle_router_config, needs_server=True)
+                _server_singleton.registry.register("router_diagnostics", handle_router_diagnostics, needs_server=True)
+                _server_singleton.registry.register("router_test", handle_router_test, needs_server=True)
+                _server_singleton.registry.register("router_battery", handle_router_battery, needs_server=True)
+                _server_singleton.registry.register("router_self_test", handle_router_self_test, needs_server=True)
+                _server_singleton.registry.register("session_create", handle_session_create, needs_server=True)
+                _server_singleton.registry.register("context_envelope_create", handle_context_envelope_create, needs_server=True)
+                _server_singleton.registry.register("context_envelopes_list", handle_context_envelopes_list, needs_server=True)
+                _server_singleton.registry.register("artifact_create", handle_artifact_create, needs_server=True)
+                _server_singleton.registry.register("artifacts_list", handle_artifacts_list, needs_server=True)
+                _server_singleton.registry.register("session_analytics", handle_session_analytics, needs_server=True)
+            except NameError:
+                # Functions not yet defined, will be registered later
+                pass
+            logger.info(f"Registered {len(_server_singleton.registry._handlers)} tools via registry")
+        else:
+            logger.warning("Registry is None, tools will use legacy dispatch table")
+    except Exception as e:
+        logger.error(f"Failed to register handlers: {e}")
+        pass
+
     return _server_singleton
 
 # Modular registry integration
@@ -405,7 +456,9 @@ try:
     from core.registry import ToolRegistry
     from core.context_manager import ContextManager as _ContextManager
     from core.executor import async_executor
-except Exception:
+    logger.info("Successfully imported modular components")
+except Exception as e:
+    logger.warning(f"Failed to import modular components: {e}")
     ToolRegistry = None
     _ContextManager = None
     async_executor = None
@@ -429,6 +482,11 @@ def _register_all_handlers(server):
     server.registry.register("agent_team_review_and_test", agent_teams.handle_agent_team_review_and_test, needs_server=True)
     server.registry.register("agent_team_refactor", agent_teams.handle_agent_team_refactor, needs_server=True)
     server.registry.register("agent_collaborate", agent_teams.handle_agent_collaborate, needs_server=True)
+    server.registry.register("generate_detailed_plan", agent_teams.handle_generate_detailed_plan, needs_server=True)
+    # Ephemeral agent handlers (Phase 2 Priority 1)
+    server.registry.register("request_ephemeral_agent", agent_teams.handle_request_ephemeral_agent, needs_server=True)
+    server.registry.register("release_ephemeral_agent", agent_teams.handle_release_ephemeral_agent, needs_server=True)
+    server.registry.register("get_ephemeral_agent_stats", agent_teams.handle_get_ephemeral_agent_stats, needs_server=True)
     # Memory handlers
     server.registry.register("store_memory", memory.handle_memory_store, needs_server=True)
     server.registry.register("retrieve_memory", memory.handle_memory_retrieve, needs_server=True)
@@ -476,12 +534,38 @@ def _register_all_handlers(server):
     except Exception:
         pass
     # Task/status and tool-calling chat
-    try:
-        from handlers import tasks
-        server.registry.register("get_task_status", tasks.handle_get_task_status, needs_server=True)
-    except Exception:
-        pass
+    # Note: get_task_status is registered by agentic_handlers if available, otherwise by tasks handler
+    if not (hasattr(server, 'agentic_handlers') and server.agentic_handlers):
+        try:
+            from handlers import tasks
+            server.registry.register("get_task_status", tasks.handle_get_task_status, needs_server=True)
+        except Exception:
+            pass
     server.registry.register("chat_with_tools", handle_chat_with_tools, needs_server=True)
+
+    # Agentic task management tools
+    if hasattr(server, 'agentic_handlers') and server.agentic_handlers:
+        server.registry.register("start_agentic_task", server.agentic_handlers.handle_start_agentic_task, needs_server=True)
+        server.registry.register("get_task_status", server.agentic_handlers.handle_get_task_status, needs_server=True)
+        server.registry.register("list_all_tasks", server.agentic_handlers.handle_list_all_tasks, needs_server=True)
+        server.registry.register("get_task_results", server.agentic_handlers.handle_get_task_results, needs_server=True)
+        server.registry.register("cancel_task", server.agentic_handlers.handle_cancel_task, needs_server=True)
+        server.registry.register("get_task_activity_log", server.agentic_handlers.handle_get_task_activity_log, needs_server=True)
+
+        # Register existing tools for agentic execution
+        agentic_tools = [
+            ("deep_research", research.handle_deep_research),
+            ("agent_team_plan_and_code", agent_teams.handle_agent_team_plan_and_code),
+            ("agent_team_review_and_test", agent_teams.handle_agent_team_review_and_test),
+            ("agent_team_refactor", agent_teams.handle_agent_team_refactor),
+            ("web_search", research.handle_web_search),
+            ("agent_collaborate", agent_teams.handle_agent_collaborate),
+        ]
+
+        for tool_name, handler_func in agentic_tools:
+            server.agentic_handlers.register_tool_handler(tool_name, handler_func)
+
+        logger.info(f"Registered {len(agentic_tools)} tools for agentic execution")
 
     server.registry.register("workflow_explain", workflow.handle_workflow_explain, needs_server=True)
     server.registry.register("workflow_execute", workflow.handle_workflow_execute, needs_server=True)
@@ -492,21 +576,23 @@ def _register_all_handlers(server):
     server.registry.register("audit_compliance_report", audit.handle_audit_compliance_report, needs_server=True)
     server.registry.register("audit_review_action", audit.handle_audit_review_action, needs_server=True)
     # System/Router/Session (keep in server.py implementation)
-    server.registry.register("health_check", handle_health_check, needs_server=True)
-    server.registry.register("get_version", handle_get_version, needs_server=True)
-    server.registry.register("router_config", handle_router_config, needs_server=True)
+    # Note: These functions are defined later in the file, so we'll register them in get_server_singleton
+    # server.registry.register("health_check", handle_health_check, needs_server=True)
+    # server.registry.register("get_version", handle_get_version, needs_server=True)
+    # server.registry.register("router_config", handle_router_config, needs_server=True)
 
-    server.registry.register("router_diagnostics", handle_router_diagnostics, needs_server=True)
-    server.registry.register("router_test", handle_router_test, needs_server=True)
-    server.registry.register("router_battery", handle_router_battery, needs_server=True)
-    server.registry.register("router_self_test", handle_router_self_test, needs_server=True)
-    server.registry.register("session_create", handle_session_create, needs_server=True)
-    server.registry.register("context_envelope_create", handle_context_envelope_create, needs_server=True)
-    server.registry.register("context_envelopes_list", handle_context_envelopes_list, needs_server=True)
-    server.registry.register("artifact_create", handle_artifact_create, needs_server=True)
-    server.registry.register("artifacts_list", handle_artifacts_list, needs_server=True)
-    server.registry.register("session_analytics", handle_session_analytics, needs_server=True)
-    server.registry.register("router_config", handle_router_config, needs_server=True)
+    # These functions are defined later in the file, so we'll register them separately
+    # server.registry.register("router_diagnostics", handle_router_diagnostics, needs_server=True)
+    # server.registry.register("router_test", handle_router_test, needs_server=True)
+    # server.registry.register("router_battery", handle_router_battery, needs_server=True)
+    # server.registry.register("router_self_test", handle_router_self_test, needs_server=True)
+    # server.registry.register("session_create", handle_session_create, needs_server=True)
+    # server.registry.register("context_envelope_create", handle_context_envelope_create, needs_server=True)
+    # server.registry.register("context_envelopes_list", handle_context_envelopes_list, needs_server=True)
+    # server.registry.register("artifact_create", handle_artifact_create, needs_server=True)
+    # server.registry.register("artifacts_list", handle_artifacts_list, needs_server=True)
+    # server.registry.register("session_analytics", handle_session_analytics, needs_server=True)
+    # server.registry.register("router_config", handle_router_config, needs_server=True)
 
 
 
@@ -777,23 +863,103 @@ def _get_base_dir() -> Path:
 # Backward-compat constant (not used in new code paths)
 _BASE_DIR = _get_base_dir()
 
+# Multi-base directory support
+# Allows the server to operate in multiple approved roots and request permission for new ones.
+from typing import List as _List
+
+def _get_allowed_dirs() -> _List[Path]:
+    """Return the list of allowed base directories.
+    Priority:
+    1) ALLOWED_BASE_DIRS (os.pathsep-separated)
+    2) ALLOWED_BASE_DIR (single)
+    3) Current working directory (default)
+    """
+    dirs: _List[Path] = []
+    env_multi = os.getenv("ALLOWED_BASE_DIRS", "").strip()
+    if env_multi:
+        for raw in env_multi.split(os.pathsep):
+            s = raw.strip()
+            if s:
+                try:
+                    dirs.append(Path(s).resolve())
+                except Exception:
+                    continue
+    env_single = os.getenv("ALLOWED_BASE_DIR", "").strip()
+    if env_single:
+        try:
+            dirs.append(Path(env_single).resolve())
+        except Exception:
+            pass
+    # Always include the current working directory as a safe default
+    try:
+        dirs.append(Path(os.getcwd()).resolve())
+    except Exception:
+        pass
+    # De-duplicate while preserving order
+    seen = set()
+    unique: _List[Path] = []
+    for d in dirs:
+        if d not in seen:
+            seen.add(d)
+            unique.append(d)
+    return unique or [Path(os.getcwd()).resolve()]
+
+class AllowedPathsManager:
+    """Manages allowed directories and runtime grants.
+    Thread-safe enough for typical MCP usage; can be extended to persistent storage if needed.
+    """
+    def __init__(self, initial_dirs: _List[Path]):
+        self._allowed = [p for p in initial_dirs if isinstance(p, Path)]
+
+    def list(self) -> _List[str]:
+        return [str(p) for p in self._allowed]
+
+    def is_allowed(self, rp: Path) -> bool:
+        for base in self._allowed:
+            try:
+                rp.relative_to(base)
+                return True
+            except Exception:
+                continue
+        return False
+
+    def grant(self, directory: str) -> str:
+        p = Path(directory).resolve()
+        if not p.exists() or not p.is_dir():
+            raise ValidationError("Directory does not exist or is not a directory")
+        # Avoid duplicates
+        for base in self._allowed:
+            if p == base:
+                return str(p)
+        self._allowed.append(p)
+        return str(p)
+
+# Initialize global allowed paths manager
+_allowed_paths_manager = AllowedPathsManager(_get_allowed_dirs())
+
+
 # Firecrawl configuration: do not embed secrets; require FIRECRAWL_API_KEY via environment
 FIRECRAWL_BASE_URL_STATIC = "https://api.firecrawl.dev"
 
 
 def _safe_path(p: str) -> Path:
-    """Return a resolved path if and only if it is inside the allowed base dir.
-    Uses dynamic base directory to respect current working directory in tests unless ALLOWED_BASE_DIR is set.
+    """Return a resolved path if and only if it is inside an allowed base dir.
+    Supports multiple allowed roots and explicit runtime grants.
+    If outside allowed roots, raise a structured ValidationError hinting how to grant access.
     """
     if not p or not isinstance(p, str):
         raise ValidationError("file_path must be a non-empty string")
     rp = Path(p).resolve()
-    base = _get_base_dir()
-    try:
-        rp.relative_to(base)
-    except Exception:
-        raise ValidationError("Path outside allowed base directory")
-    return rp
+    if _allowed_paths_manager.is_allowed(rp):
+        return rp
+    # Not allowed: provide structured guidance
+    hint = {
+        "code": "PATH_NOT_ALLOWED",
+        "path": str(rp),
+        "allowed_roots": _allowed_paths_manager.list(),
+        "hint": "Call grant_directory_access with {'directory': '<dir-to-allow>'} to approve access."
+    }
+    raise ValidationError(json.dumps(hint))
 
 
 def _safe_directory(p: str) -> Path:
@@ -852,6 +1018,35 @@ class EnhancedLMStudioMCPServer:
         self._loop_thread = None
         self._setup_async_management()
 
+        # Initialize registry and context manager (will be populated later)
+        try:
+            self.registry = ToolRegistry() if ToolRegistry is not None else None
+        except Exception as e:
+            logger.warning(f"Failed to initialize ToolRegistry: {e}")
+            self.registry = None
+        try:
+            self.context_manager = _ContextManager({}) if _ContextManager is not None else None
+        except Exception as e:
+            logger.warning(f"Failed to initialize ContextManager: {e}")
+            self.context_manager = None
+
+        # Initialize agentic task management system
+        self.task_manager = None
+        self.agentic_handlers = None
+        if AGENTIC_AVAILABLE:
+            try:
+                # Initialize task manager with custom storage path if specified
+                storage_path = os.getenv("AGENTIC_STORAGE_PATH")
+                self.task_manager = TaskManager(storage_path)
+                self.agentic_handlers = AgenticToolHandlers(self.task_manager)
+                logger.info("Agentic task management system initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize agentic system: {e}")
+                self.task_manager = None
+                self.agentic_handlers = None
+        else:
+            logger.info("Agentic task management system not available")
+
 
     # --- LM Studio model discovery & selection helpers ---
     def refresh_lmstudio_models(self, force: bool = False) -> list[str]:
@@ -895,21 +1090,6 @@ class EnhancedLMStudioMCPServer:
             logger.info("Configured LM Studio model '%s' not available; using '%s'", configured or "<empty>", fallback)
             return fallback
         raise RuntimeError("No LM Studio models available at /v1/models. Load a model in LM Studio and retry.")
-
-        # Modular registry and context manager (non-breaking initialization)
-        try:
-            self.registry = ToolRegistry() if ToolRegistry is not None else None
-        except Exception:
-            self.registry = None
-        try:
-            self.context_manager = _ContextManager({}) if _ContextManager is not None else None
-        except Exception:
-            self.context_manager = None
-        try:
-            if self.registry is not None:
-                _register_all_handlers(self)
-        except Exception:
-            pass
 
 
 
@@ -1003,8 +1183,24 @@ class EnhancedLMStudioMCPServer:
                 return await self.http_client.post_async(compl_url, json_data=compl_payload, headers=headers, operation_type=operation_type)
             raise
 
-    async def _lmstudio_request_with_retry(self, prompt: str, temperature: float = 0.35, retries: int = 2, backoff: float = 0.5) -> str:
-        """Direct LM Studio request with enhanced HTTP client, circuit breaker, and retry logic"""
+    async def _lmstudio_request_with_retry(self, prompt: str, temperature: float = 0.35) -> str:
+        """Direct LM Studio request with enhanced HTTP client, circuit breaker, and retry logic.
+        Retries and backoff are controlled via env:
+          - LMSTUDIO_MAX_RETRIES (default 1)
+          - LMSTUDIO_RETRY_BACKOFF (seconds, default 1.0)
+          - NO_FALLBACK_PROVIDERS (when true, skip OpenAI/Anthropic fallbacks)
+        """
+
+        # Resolve retry/backoff settings from environment
+        try:
+            retries = int(os.getenv("LMSTUDIO_MAX_RETRIES", "1"))
+        except Exception:
+            retries = 1
+        try:
+            backoff = float(os.getenv("LMSTUDIO_RETRY_BACKOFF", "1.0"))
+        except Exception:
+            backoff = 1.0
+        no_fallbacks = os.getenv("NO_FALLBACK_PROVIDERS", "0").strip().lower() in {"1","true","yes","on","lmstudio_only"}
 
         circuit_breaker = _circuit_breakers["lmstudio"]
 
@@ -1081,9 +1277,9 @@ class EnhancedLMStudioMCPServer:
             if attempt <= retries:
                 await asyncio.sleep(backoff * attempt)
 
-        # As a last-resort fallback, if LM Studio is unreachable and OpenAI is configured, try OpenAI directly
+        # As a last-resort fallback, if allowed and OpenAI is configured, try OpenAI directly
         try:
-            if os.getenv("OPENAI_API_KEY"):
+            if (not no_fallbacks) and os.getenv("OPENAI_API_KEY"):
                 obase = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
                 omodel = os.getenv("OPENAI_FALLBACK_MODEL") or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
                 oresp = await self._post_chat_with_fallback(
@@ -1132,7 +1328,7 @@ class EnhancedLMStudioMCPServer:
                 logger.warning(f"Router failed, falling back to direct LM Studio: {e}")
 
         # Fallback to direct LM Studio request
-        return await self._lmstudio_request_with_retry(prompt, temperature=temperature, retries=retries, backoff=backoff)
+        return await self._lmstudio_request_with_retry(prompt, temperature=temperature)
 
 
     async def _router_wait(self, backend: str):
@@ -1252,19 +1448,19 @@ class EnhancedLMStudioMCPServer:
                 intent_l = (intent_str or "").strip().lower()
                 # 1) Overseer/Reviewer override
                 if os.getenv("OVERSEER_USE_OPUS", "1").strip().lower() in {"1","true","yes","on"} and role_l in {"overseer","reviewer"}:
-                    return os.getenv("ANTHROPIC_MODEL_OVERSEER", "claude-4-opus")
+                    return os.getenv("ANTHROPIC_MODEL_OVERSEER", "claude-3-opus-latest")
                 # 2) Complexity-based
                 if _is_complex_text(prompt_text, intent_l, complexity_hint):
-                    return os.getenv("ANTHROPIC_MODEL_COMPLEX", "claude-4-opus")
+                    return os.getenv("ANTHROPIC_MODEL_COMPLEX", "claude-3-opus-latest")
                 # 3) Intent-based analysis
                 if intent_l in {"analysis","architecture","validation"} and os.getenv("OPUS_FOR_ANALYSIS", "1").strip().lower() in {"1","true","yes","on"}:
-                    return os.getenv("ANTHROPIC_MODEL_COMPLEX", "claude-4-opus")
+                    return os.getenv("ANTHROPIC_MODEL_COMPLEX", "claude-3-opus-latest")
                 # 4) Low-confidence from router agent
                 if os.getenv("OPUS_FOR_LOW_CONF", "1").strip().lower() in {"1","true","yes","on"}:
                     try:
                         thr = float(os.getenv("LOW_CONF_THRESHOLD", "0.5"))
                         if agent_conf is not None and float(agent_conf) < thr:
-                            return os.getenv("ANTHROPIC_MODEL_COMPLEX", "claude-4-opus")
+                            return os.getenv("ANTHROPIC_MODEL_COMPLEX", "claude-3-opus-latest")
                     except Exception:
                         pass
             except Exception:
@@ -1281,10 +1477,10 @@ class EnhancedLMStudioMCPServer:
             if backend == "openai" and os.getenv("OPENAI_API_KEY"):
                 await self._router_wait("openai")
                 base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-                model = (model_override or os.getenv("OPENAI_MODEL", "gpt-5"))
-                # normalize common aliases
-                if model in {"gpt5", "gpt-5-full"}:
-                    model = "gpt-5"
+                model = (model_override or os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
+                # normalize common aliases and map legacy names
+                if model in {"gpt5", "gpt-5", "gpt-5-full"}:
+                    model = "gpt-4o-mini"
                 decision["model"] = model
 
                 # Use enhanced HTTP client with adaptive timeout
@@ -1307,7 +1503,7 @@ class EnhancedLMStudioMCPServer:
             if backend == "anthropic" and (os.getenv("ANTHROPIC_API_KEY") or (BEDROCK_AVAILABLE and os.getenv("USE_BEDROCK", "false").lower() in {"true", "1", "yes", "on"})):
                 await self._router_wait("anthropic")
                 base = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1")
-                default_model = (model_override or os.getenv("ANTHROPIC_MODEL", "claude-4-sonnet"))
+                default_model = (model_override or os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest"))
                 agent_conf = None
                 try:
                     agent_conf = decision.get("agent", {}).get("confidence") or decision.get("agent_json", {}).get("confidence")
@@ -1447,9 +1643,10 @@ class EnhancedLMStudioMCPServer:
                 headers={"Content-Type": "application/json"},
                 operation_type=operation_type
             )
-            choices = data.get("choices") or []
-            if choices:
-                return choices[0].get("message", {}).get("content", "") or "Error: No response from model"
+            # Use the new reasoning model content extraction
+            extracted_content = _extract_content_from_response(data, self.model_name)
+            if extracted_content:
+                return extracted_content
             return "Error: No response from model"
         except Exception as e:
             logger.error(f"Error making LLM request: {e}")
@@ -1480,6 +1677,18 @@ def handle_message(message):
         elif method == "tools/list":
             expose_public_only = os.getenv("EXPOSE_PUBLIC_ONLY", "1").strip().lower() in {"1","true","yes"}
             tools_payload = get_public_tools() if expose_public_only else get_all_tools()
+
+            # Validate tool uniqueness for Claude Sonnet 4.5 compatibility
+            if isinstance(tools_payload, dict) and isinstance(tools_payload.get("tools"), list):
+                tool_names = [t.get("name") for t in tools_payload["tools"] if isinstance(t, dict) and t.get("name")]
+                if len(tool_names) != len(set(tool_names)):
+                    logger.error(
+                        "CRITICAL: Duplicate tool names detected in tools/list response! "
+                        "This will cause errors with Claude Sonnet 4.5. "
+                        "Applying emergency deduplication."
+                    )
+                    tools_payload["tools"] = _deduplicate_tools(tools_payload["tools"])
+
             # MCP spec expects input_schema (snake_case). Our registry uses inputSchema (camelCase).
             # Provide both to maximize client compatibility without changing internal structures.
             try:
@@ -1514,8 +1723,51 @@ def handle_message(message):
             }
         }
 
+def _deduplicate_tools(tools_list: list[dict]) -> list[dict]:
+    """Deduplicate tools by name, keeping the first occurrence.
+
+    Claude Sonnet 4.5 requires unique tool names. This function ensures
+    no duplicate tool names are exposed to MCP clients.
+
+    Args:
+        tools_list: List of tool definitions
+
+    Returns:
+        Deduplicated list of tools
+    """
+    seen_names = set()
+    deduplicated = []
+    duplicates_found = []
+
+    for tool in tools_list:
+        if not isinstance(tool, dict):
+            continue
+
+        name = tool.get("name")
+        if not name:
+            continue
+
+        if name in seen_names:
+            duplicates_found.append(name)
+            continue
+
+        seen_names.add(name)
+        deduplicated.append(tool)
+
+    if duplicates_found:
+        logger.warning(
+            f"Removed {len(duplicates_found)} duplicate tool(s) for Claude Sonnet 4.5 compatibility: "
+            f"{', '.join(sorted(set(duplicates_found)))}"
+        )
+
+    return deduplicated
+
+
 def get_all_tools():
-    """Return all available tools with enhanced capabilities"""
+    """Return all available tools with enhanced capabilities.
+
+    Tools are automatically deduplicated to ensure Claude Sonnet 4.5 compatibility.
+    """
     base = {
         "tools": [
             # Research & Planning
@@ -1853,17 +2105,98 @@ def get_all_tools():
             {"name": "artifacts_list", "description": "List artifacts for a session (V2).", "inputSchema": {"type":"object","properties":{"session_id":{"type":"string"},"limit":{"type":"integer","default":50}}, "required":["session_id"]}},
             {"name": "session_analytics", "description": "Return analytics for a collaboration session (V2).", "inputSchema": {"type":"object","properties":{"session_id":{"type":"string"}}, "required":["session_id"]}},
 
-            {"name": "file_scaffold", "description": "Create a new module or test skeleton.", "inputSchema": {"type":"object","properties":{"path":{"type":"string"},"kind":{"type":"string","enum":["module","test"]},"description":{"type":"string"},"dry_run":{"type":"boolean","default":True}}, "required":["path","kind"]}}
+            {"name": "file_scaffold", "description": "Create a new module or test skeleton.", "inputSchema": {"type":"object","properties":{"path":{"type":"string"},"kind":{"type":"string","enum":["module","test"]},"description":{"type":"string"},"dry_run":{"type":"boolean","default":True}}, "required":["path","kind"]}},
+
+            # Agentic Task Management Tools
+            {
+                "name": "start_agentic_task",
+                "description": "Start any tool as a background agentic task. Users can check back later to see progress and results.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "tool_name": {"type": "string", "description": "Name of the tool to execute in background"},
+                        "tool_arguments": {"type": "object", "description": "Arguments to pass to the tool"},
+                        "description": {"type": "string", "description": "Optional description of what the task will do"}
+                    },
+                    "required": ["tool_name", "tool_arguments"]
+                }
+            },
+            {
+                "name": "get_task_status",
+                "description": "Get the current status and progress of a background agentic task.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": {"type": "string", "description": "Unique task identifier"},
+                        "include_log": {"type": "boolean", "description": "Whether to include activity log", "default": False}
+                    },
+                    "required": ["task_id"]
+                }
+            },
+            {
+                "name": "list_all_tasks",
+                "description": "List all agentic tasks with optional filtering. Shows autonomous agent work status.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "status_filter": {"type": "string", "description": "Filter by status: pending, running, completed, failed, cancelled"},
+                        "limit": {"type": "integer", "description": "Maximum number of tasks to return", "default": 50},
+                        "include_results": {"type": "boolean", "description": "Whether to include task results", "default": False}
+                    }
+                }
+            },
+            {
+                "name": "get_task_results",
+                "description": "Get the complete results of a completed agentic task.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": {"type": "string", "description": "Unique task identifier"}
+                    },
+                    "required": ["task_id"]
+                }
+            },
+            {
+                "name": "cancel_task",
+                "description": "Cancel a running background agentic task.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": {"type": "string", "description": "Unique task identifier"}
+                    },
+                    "required": ["task_id"]
+                }
+            },
+            {
+                "name": "get_task_activity_log",
+                "description": "Get detailed activity log for an agentic task to see what the agent accomplished.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": {"type": "string", "description": "Unique task identifier"},
+                        "limit": {"type": "integer", "description": "Maximum number of log entries", "default": 100}
+                    },
+                    "required": ["task_id"]
+                }
+            }
         ]
     }
     # Allow enhanced module to merge/augment tools while preserving shape
-    return _merged_tools(base)
+    merged = _merged_tools(base)
+
+    # Deduplicate tools for Claude Sonnet 4.5 compatibility
+    if isinstance(merged, dict) and "tools" in merged:
+        merged["tools"] = _deduplicate_tools(merged["tools"])
+
+    return merged
 
 
 
 def get_public_tools():
     """Return a curated subset of tools suitable for agents to discover quickly.
     Includes task status polling so agents can orchestrate long-running work.
+
+    Tools are automatically deduplicated to ensure Claude Sonnet 4.5 compatibility.
     """
     full = get_all_tools()
     tools = full.get("tools", []) if isinstance(full, dict) else []
@@ -1881,8 +2214,18 @@ def get_public_tools():
         "chat_with_tools",
         "list_directory",
         "read_file_range",
+        # Agentic task management tools
+        "start_agentic_task",
+        "list_all_tasks",
+        "get_task_results",
+        "cancel_task",
+        "get_task_activity_log",
     }
     curated = [t for t in tools if isinstance(t, dict) and t.get("name") in allow]
+
+    # Additional deduplication pass for safety (Claude Sonnet 4.5 compatibility)
+    curated = _deduplicate_tools(curated)
+
     return {"tools": curated}
 
 
@@ -1957,6 +2300,55 @@ def handle_cognitive_codegen_one_shot(arguments, server):
 
 
 
+def _extract_content_from_response(data, model_name=""):
+    """
+    Extract content from LM Studio response, handling reasoning models.
+
+    Reasoning models (like openai/gpt-oss-20b) put their thinking in 'reasoning'
+    and final answer in 'content'. If content is empty, we use reasoning.
+    """
+    choices = data.get('choices', [])
+    if not choices:
+        return ""
+
+    choice = choices[0]
+    message = choice.get('message', {})
+
+    # Get content and reasoning
+    content = message.get('content', '').strip()
+    reasoning = message.get('reasoning', '').strip()
+
+    # For reasoning models, prefer content but fallback to reasoning
+    if content:
+        return content
+    elif reasoning:
+        # For reasoning models, we can return the reasoning as the response
+        # or format it nicely
+        if 'gpt-oss' in model_name.lower() or 'reasoning' in model_name.lower():
+            return f"[Reasoning]: {reasoning}"
+        return reasoning
+
+    # Fallback to text field for completions endpoint
+    text = choice.get('text', '').strip()
+    if text:
+        # Clean up special tokens for reasoning models
+        if '<|channel|>' in text:
+            # Extract the actual content after special tokens
+            parts = text.split('<|message|>')
+            if len(parts) > 1:
+                return parts[-1].strip()
+        return text
+
+    return ""
+
+def _is_reasoning_model(model_name):
+    """Check if a model is a reasoning model that needs special handling"""
+    reasoning_indicators = [
+        'gpt-oss', 'reasoning', 'thinking', 'o1-', 'chain-of-thought'
+    ]
+    model_lower = model_name.lower()
+    return any(indicator in model_lower for indicator in reasoning_indicators)
+
 def _make_robust_lm_studio_request(server, model, messages, temperature, max_tokens, top_p, tools, safe_tool_choice, has_tools, transcript):
     """
     Make a robust request to LM Studio with comprehensive retry logic and fallbacks.
@@ -1968,7 +2360,7 @@ def _make_robust_lm_studio_request(server, model, messages, temperature, max_tok
     import requests
 
     retry_count = 0
-    max_retries = 2  # Reduced retries for faster fallback
+    max_retries = int(_os.getenv("LMSTUDIO_MAX_RETRIES", "3"))  # More retries for reasoning models
 
     # Ensure we use an LM Studio model that is actually loaded
     try:
@@ -2012,12 +2404,16 @@ def _make_robust_lm_studio_request(server, model, messages, temperature, max_tok
 
     while retry_count <= max_retries:
         try:
-            # Use direct requests with strict timeout for LM Studio
+            # Use direct requests with generous timeout for LM Studio reasoning models
+            # Reasoning models need more time to think (3-10 seconds typical)
+            connect_timeout = int(os.getenv("HTTP_CONNECT_TIMEOUT", "10"))
+            read_timeout = int(os.getenv("HTTP_READ_TIMEOUT_SIMPLE", "120"))
+
             response = requests.post(
                 f"{server.base_url}/v1/chat/completions",
                 json=payload,
                 headers={"Content-Type": "application/json"},
-                timeout=(2, 8)  # 2s connect, 8s read - much shorter than default
+                timeout=(connect_timeout, read_timeout)
             )
 
             if response.status_code == 200:
@@ -2027,11 +2423,10 @@ def _make_robust_lm_studio_request(server, model, messages, temperature, max_tok
 
             # === CRITICAL FIX: Check for empty response immediately ===
             if data and data.get("choices"):
-                choice = (data.get("choices") or [{}])[0]
-                msg = choice.get("message", {})
-                content_check = (msg.get("content") or "").strip()
+                # Use the new reasoning model content extraction
+                extracted_content = _extract_content_from_response(data, model)
 
-                if content_check:  # Non-empty content - success!
+                if extracted_content:  # Non-empty content - success!
                     transcript.append({"note": f"LM Studio success on attempt {retry_count + 1}"})
                     return data
                 else:
@@ -2220,7 +2615,7 @@ def handle_chat_with_tools(arguments, server):
     max_iters = max(1, int(arguments.get("max_iters", 4)))  # Ensure at least 1 iteration
     temperature = max(0.0, min(2.0, float(arguments.get("temperature", _os.getenv("TOOLCALL_DEFAULT_TEMPERATURE", 0.2)))))  # Clamp to valid range
     tool_choice = (arguments.get("tool_choice") or _os.getenv("TOOLCALL_TOOL_CHOICE_DEFAULT", "auto")).lower()
-    model = arguments.get("model") or _os.getenv("LMSTUDIO_FUNCTION_MODEL") or server.model_name or "openai/gpt-oss-20b"
+    model = arguments.get("model") or _os.getenv("LMSTUDIO_FUNCTION_MODEL") or server.model_name or "mistralai/magistral-small-2509"
     top_p = arguments.get("top_p")
     if top_p is not None:
         top_p = max(0.0, min(1.0, float(top_p)))  # Clamp to valid range
@@ -2315,7 +2710,8 @@ def handle_chat_with_tools(arguments, server):
 
         msg = choice.get("message", {})
         tool_calls = msg.get("tool_calls") or []
-        content = (msg.get("content") or "").strip()
+        # Use reasoning model extraction for content
+        content = _extract_content_from_response(data, model).strip()
         if tool_calls:
             # Execute each tool call and append tool results
             for tc in tool_calls:
@@ -2684,7 +3080,7 @@ def handle_deep_research(arguments, server):
             # Prefer LMSTUDIO_* variables if set; fall back to OPENAI_* for backward compat
             lmstudio_base = os.getenv("LMSTUDIO_API_BASE") or os.getenv("OPENAI_API_BASE", "http://localhost:1234/v1")
             lmstudio_key = os.getenv("LMSTUDIO_API_KEY") or os.getenv("OPENAI_API_KEY", "sk-noauth")
-            hardwired_model = os.getenv("LMSTUDIO_MODEL", "openai/gpt-oss-20b")
+            hardwired_model = os.getenv("LMSTUDIO_MODEL", "mistralai/magistral-small-2509")
             llm = LLM(model=hardwired_model, base_url=lmstudio_base, api_key=lmstudio_key, temperature=0.2)
         except Exception:
             llm = None  # If LLM config fails, proceed; fallback synthesis will cover errors
@@ -2854,6 +3250,10 @@ def handle_tool_call(message):
             "retrieve_memory": (handle_memory_retrieve, True),
             "health_check": (handle_health_check, True),
             "get_version": (handle_get_version, True),
+            # Filesystem permissions (new)
+            "list_allowed_directories": (handle_list_allowed_directories, False),
+            "grant_directory_access": (handle_grant_directory_access, False),
+            "deny_directory_access": (handle_deny_directory_access, False),
 
             # Web research
             "web_search": (handle_web_search, True),
@@ -2876,6 +3276,7 @@ def handle_tool_call(message):
             # Smart router
             "smart_task": (handle_smart_task, True),
             "router_self_test": (handle_router_self_test, True),
+            "chat_with_tools": (handle_chat_with_tools, True),
 
             # Diagnostics & analysis
             "backend_diagnostics": (handle_backend_diagnostics, True),
@@ -3380,6 +3781,44 @@ def handle_directory_list(arguments):
         raise
     except Exception as e:
         return f"Error listing directory: {str(e)}"
+
+
+
+def handle_list_allowed_directories(arguments):
+    """List currently allowed base directories for filesystem operations."""
+    return {"allowed_directories": _allowed_paths_manager.list()}
+
+
+def handle_grant_directory_access(arguments):
+    """Grant runtime access to an external directory (explicit user permission required).
+    arguments: { directory: str }
+    """
+    directory = (arguments.get("directory") or "").strip()
+    if not directory:
+        raise ValidationError("'directory' is required")
+    granted = _allowed_paths_manager.grant(directory)
+    return {"granted": granted, "allowed_directories": _allowed_paths_manager.list()}
+
+
+def handle_deny_directory_access(arguments):
+    """Revoke runtime access to a previously allowed directory.
+    arguments: { directory: str }
+    """
+    directory = (arguments.get("directory") or "").strip()
+    if not directory:
+        raise ValidationError("'directory' is required")
+    p = Path(directory).resolve()
+    # Filter out exact match; keep others
+    kept = []
+    removed = False
+    for base in list(_allowed_paths_manager._allowed):
+        if base == p:
+            removed = True
+            continue
+        kept.append(base)
+    _allowed_paths_manager._allowed = kept
+    return {"revoked": str(p) if removed else None, "allowed_directories": _allowed_paths_manager.list()}
+
 
 def handle_file_search(arguments):
     """Handle file searching (restricted to ALLOWED_BASE_DIR)"""
@@ -4134,7 +4573,7 @@ def handle_smart_task(arguments, server):
                 f"Choose the single best tool, propose minimal arguments, and set confidence."
             )
             payload = {
-                "model": getattr(server, "model_name", None) or os.getenv("LMSTUDIO_MODEL", "openai/gpt-oss-20b"),
+                "model": getattr(server, "model_name", None) or os.getenv("LMSTUDIO_MODEL", "mistralai/magistral-small-2509"),
                 "messages": [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_prompt}],
                 "temperature": 0.0,
                 "max_tokens": 512,
@@ -4816,16 +5255,16 @@ def _build_llm_for_backend(backend: str):
         if backend == "openai":
             key = os.getenv("OPENAI_API_KEY", "").strip()
             base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-            model = os.getenv("OPENAI_MODEL", "gpt-5")
-            if model in {"gpt5", "gpt-5-full"}:
-                model = "gpt-5"
+            model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+            if model in {"gpt5", "gpt-5", "gpt-5-full"}:
+                model = "gpt-4o-mini"
             if not key:
                 return None
             return LLM(model=model, api_key=key, base_url=base, temperature=0.2)
         if backend == "anthropic":
             key = os.getenv("ANTHROPIC_API_KEY", "").strip()
             base = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1")
-            model = os.getenv("ANTHROPIC_MODEL", "claude-4-sonnet")
+            model = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
 
             # Check if Bedrock should be used
             use_bedrock = os.getenv("USE_BEDROCK", "false").lower() in {"true", "1", "yes", "on"}
@@ -4839,7 +5278,7 @@ def _build_llm_for_backend(backend: str):
         # default lmstudio
         base = os.getenv("OPENAI_API_BASE", "http://localhost:1234/v1")
         key = os.getenv("OPENAI_API_KEY", "sk-noauth")
-        model = os.getenv("LMSTUDIO_MODEL", "openai/gpt-oss-20b")
+        model = os.getenv("LMSTUDIO_MODEL", "mistralai/magistral-small-2509")
         return LLM(model=model, api_key=key, base_url=base, temperature=0.2)
     except Exception:
         return None
@@ -4960,7 +5399,7 @@ def _make_crewai_llm():
         # Prefer LMSTUDIO_* if set, else fallback to OPENAI_* for compatibility
         lmstudio_base = os.getenv("LMSTUDIO_API_BASE") or os.getenv("OPENAI_API_BASE", "http://localhost:1234/v1")
         lmstudio_key = os.getenv("LMSTUDIO_API_KEY") or os.getenv("OPENAI_API_KEY", "sk-noauth")
-        hardwired_model = os.getenv("LMSTUDIO_MODEL", "openai/gpt-oss-20b")
+        hardwired_model = os.getenv("LMSTUDIO_MODEL", "mistralai/magistral-small-2509")
         return LLM(model=hardwired_model, base_url=lmstudio_base, api_key=lmstudio_key, temperature=0.2)
     except Exception:
         return None
@@ -5276,6 +5715,22 @@ def handle_error_patterns(arguments, server):
     if not patterns:
         return f"No error patterns found in the last {hours} hours ✅"
 
+    # Format error report
+    report = f"🚨 **Error Patterns (Last {hours} hours)**\n\n"
+
+    for pattern in patterns:
+        last_occurrence = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(pattern['last_occurrence']))
+        tool_info = f" in {pattern['tool_name']}" if pattern['tool_name'] else ""
+
+        pattern_report = f"""**{pattern['error_type']}**{tool_info}
+- Occurrences: {pattern['occurrence_count']}
+- Last Seen: {last_occurrence}
+
+"""
+        report += pattern_report
+
+    return report
+
 def handle_health_check(arguments, server):
     """Health check with optional LM Studio readiness probe and provider pings.
     - probe_lm=true: issues a small LM call (ping)
@@ -5453,21 +5908,7 @@ def handle_get_version(arguments, server):
         "model": server.model_name,
     }
 
-    # Format error report
-    report = f"🚨 **Error Patterns (Last {hours} hours)**\n\n"
 
-    for pattern in patterns:
-        last_occurrence = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(pattern['last_occurrence']))
-        tool_info = f" in {pattern['tool_name']}" if pattern['tool_name'] else ""
-
-        pattern_report = f"""**{pattern['error_type']}**{tool_info}
-- Occurrences: {pattern['occurrence_count']}
-- Last Seen: {last_occurrence}
-
-"""
-        report += pattern_report
-
-    return report
 
 def handle_debug_analysis(arguments, server):
     """Handle debugging analysis"""
