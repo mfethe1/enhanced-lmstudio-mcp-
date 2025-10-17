@@ -874,9 +874,39 @@ This enhanced MCP server is specifically designed to work with advanced coding a
 - File search ignores heavy directories by default (e.g., .git, node_modules, venv, dist, build) and caps results.
 
 ### New/Updated Environment Variables
+
+#### Core Configuration
 - ALLOWED_BASE_DIR: Absolute path to restrict file operations
 - EXECUTION_ENABLED: true|false to gate code/test execution
 - PERFORMANCE_THRESHOLD: seconds for performance alerts (default 0.2)
+
+#### Phase 2: Agentic Enhancements (NEW - 2025-01-16)
+
+**Ephemeral Agents** (Priority 1):
+- EPHEMERAL_MAX_AGENTS: Maximum concurrent ephemeral agents (default: 10)
+- EPHEMERAL_DEFAULT_LIFETIME: Default agent lifetime in seconds (default: 300)
+- EPHEMERAL_CLEANUP_INTERVAL: Cleanup check interval in seconds (default: 60)
+
+**File Locking** (Priority 2):
+- FILE_LOCK_TIMEOUT: Default lock acquisition timeout in seconds (default: 30)
+- FILE_LOCK_MAX_LOCKS: Maximum concurrent file locks (default: 100)
+
+**Workflows** (Priority 3):
+- WORKFLOW_TIMEOUT: Default workflow execution timeout in seconds (default: 300)
+- WORKFLOW_MAX_PARALLEL: Maximum parallel tasks in parallel workflow (default: 10)
+- CREW_TOOL_TIMEOUT: Timeout for CrewAI tool execution in seconds (default: 420)
+
+**Swarm Pattern** (Priority 4):
+- SWARM_TASK_TIMEOUT: Default swarm task timeout in seconds (default: 60)
+- SWARM_MAX_AGENTS: Maximum agents per swarm (default: 20)
+- SWARM_HANDOFF_TIMEOUT: Handoff operation timeout in seconds (default: 30)
+- SWARM_MESSAGE_TIMEOUT: Agent message timeout in seconds (default: 30)
+
+**Configuration Notes**:
+- All Phase 2 variables are optional with sensible defaults
+- Timeout values prevent indefinite waits and resource exhaustion
+- Limit values prevent memory exhaustion and system overload
+- See `PHASE_2_MCP_CONFIG_RECOMMENDATIONS.md` for detailed guidance
 
 
 
