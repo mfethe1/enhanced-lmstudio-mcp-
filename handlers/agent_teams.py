@@ -456,3 +456,185 @@ def handle_get_ephemeral_agent_stats(arguments: Dict[str, Any], server) -> str:
 
     return summary
 
+
+# ============================================================================
+# File Locking Handlers (Phase 2 Priority 2)
+# ============================================================================
+
+def handle_acquire_file_lock(arguments: Dict[str, Any], server) -> str:
+    """
+    Acquire a lock on a file to prevent concurrent modifications.
+
+    Args:
+        file_path (str): Path to file to lock
+        owner_id (str): ID of agent/task requesting lock
+        timeout_seconds (int, optional): Lock timeout (default: 60)
+        wait (bool, optional): Wait for lock if already locked (default: True)
+
+    Returns:
+        JSON with lock_id or error
+    """
+    import json
+    import asyncio
+    from core.file_locking import get_file_lock_manager
+
+    try:
+        file_path = arguments.get("file_path")
+        owner_id = arguments.get("owner_id")
+        timeout_seconds = arguments.get("timeout_seconds")
+        wait = arguments.get("wait", True)
+
+        if not file_path or not owner_id:
+            return json.dumps({"error": "file_path and owner_id are required"})
+
+        manager = get_file_lock_manager()
+
+        # Ensure manager is started
+        if not manager._running:
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            loop.run_until_complete(manager.start())
+
+        # Acquire lock
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        lock_id = loop.run_until_complete(manager.acquire_lock(
+            file_path=file_path,
+            owner_id=owner_id,
+            timeout_seconds=timeout_seconds,
+            wait=wait
+        ))
+
+        if lock_id:
+            return json.dumps({
+                "status": "success",
+                "lock_id": lock_id,
+                "file_path": file_path,
+                "owner_id": owner_id
+            }, indent=2)
+        else:
+            return json.dumps({
+                "status": "failed",
+                "error": "Lock acquisition failed (file already locked)",
+                "file_path": file_path
+            }, indent=2)
+
+    except TimeoutError as e:
+        return json.dumps({
+            "status": "timeout",
+            "error": str(e),
+            "file_path": arguments.get("file_path")
+        }, indent=2)
+    except FileNotFoundError as e:
+        return json.dumps({
+            "status": "error",
+            "error": f"File not found: {e}",
+            "file_path": arguments.get("file_path")
+        }, indent=2)
+    except Exception as e:
+        logger.error(f"Error acquiring file lock: {e}", exc_info=True)
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+def handle_release_file_lock(arguments: Dict[str, Any], server) -> str:
+    """
+    Release a lock on a file.
+
+    Args:
+        file_path (str): Path to file to unlock
+        owner_id (str): ID of agent/task releasing lock
+        force (bool, optional): Force release even if owner doesn't match (default: False)
+
+    Returns:
+        JSON with success status
+    """
+    import json
+    import asyncio
+    from core.file_locking import get_file_lock_manager
+
+    try:
+        file_path = arguments.get("file_path")
+        owner_id = arguments.get("owner_id")
+        force = arguments.get("force", False)
+
+        if not file_path or not owner_id:
+            return json.dumps({"error": "file_path and owner_id are required"})
+
+        manager = get_file_lock_manager()
+
+        # Release lock
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        success = loop.run_until_complete(manager.release_lock(
+            file_path=file_path,
+            owner_id=owner_id,
+            force=force
+        ))
+
+        return json.dumps({
+            "status": "success" if success else "failed",
+            "file_path": file_path,
+            "owner_id": owner_id,
+            "released": success
+        }, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error releasing file lock: {e}", exc_info=True)
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+def handle_get_file_lock_stats(arguments: Dict[str, Any], server) -> str:
+    """
+    Get statistics about the file locking system.
+
+    Returns:
+        Markdown summary with statistics
+    """
+    import json
+    from core.file_locking import get_file_lock_manager
+
+    try:
+        manager = get_file_lock_manager()
+        stats = manager.get_stats()
+
+        # Format as markdown
+        summary = f"""# File Locking System Stats
+
+## Current Status
+- **Active Locks**: {stats['active_locks']}
+- **Pending Requests**: {stats['pending_requests']}
+- **Avg Acquisition Time**: {stats['avg_acquisition_time_ms']:.1f}ms
+
+## Lifetime Stats
+- **Total Acquired**: {stats['total_acquired']}
+- **Total Released**: {stats['total_released']}
+- **Total Timeouts**: {stats['total_timeouts']}
+- **Total Force Released**: {stats['total_force_released']}
+- **Total Conflicts**: {stats['total_conflicts']}
+
+## Active Locks
+"""
+
+        if stats['locks']:
+            for lock in stats['locks']:
+                summary += f"\n- **{lock['file_path']}** (owner: {lock['owner_id']}): held {lock['hold_duration_seconds']:.1f}s, expires in {lock['time_remaining_seconds']:.1f}s"
+        else:
+            summary += "\n*No active locks*"
+
+        return summary
+
+    except Exception as e:
+        logger.error(f"Error getting file lock stats: {e}", exc_info=True)
+        return json.dumps({"error": str(e)}, indent=2)
+

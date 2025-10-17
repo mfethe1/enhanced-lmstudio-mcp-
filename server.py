@@ -487,6 +487,10 @@ def _register_all_handlers(server):
     server.registry.register("request_ephemeral_agent", agent_teams.handle_request_ephemeral_agent, needs_server=True)
     server.registry.register("release_ephemeral_agent", agent_teams.handle_release_ephemeral_agent, needs_server=True)
     server.registry.register("get_ephemeral_agent_stats", agent_teams.handle_get_ephemeral_agent_stats, needs_server=True)
+    # File locking handlers (Phase 2 Priority 2)
+    server.registry.register("acquire_file_lock", agent_teams.handle_acquire_file_lock, needs_server=True)
+    server.registry.register("release_file_lock", agent_teams.handle_release_file_lock, needs_server=True)
+    server.registry.register("get_file_lock_stats", agent_teams.handle_get_file_lock_stats, needs_server=True)
     # Memory handlers
     server.registry.register("store_memory", memory.handle_memory_store, needs_server=True)
     server.registry.register("retrieve_memory", memory.handle_memory_retrieve, needs_server=True)
