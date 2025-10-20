@@ -603,7 +603,35 @@ The server can be configured through environment variables and MCP server settin
 
 **Working Directory**: The MCP server must be configured with the correct working directory to ensure file operations work correctly.
 
-In your `mcp.json` (Augment/Claude Desktop configuration), add the `"cwd"` parameter:
+**✨ RECOMMENDED: Use `${workspaceFolder}` for Automatic Path Resolution**
+
+In your `mcp.json` (Augment/Claude Desktop configuration), use the `${workspaceFolder}` variable:
+
+```json
+{
+  "description": "Jarvis MCP Server - Automatic path resolution",
+  "mcpServers": {
+    "jarvis": {
+      "type": "stdio",
+      "command": "py",
+      "args": ["-3", "-u", "${workspaceFolder}/server.py"],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        // ... environment variables ...
+      }
+    }
+  }
+}
+```
+
+**Benefits of `${workspaceFolder}`**:
+- ✅ **Automatic**: No need to update paths when moving projects
+- ✅ **Portable**: Works on any machine without modification
+- ✅ **Clean**: No hardcoded paths in configuration
+- ✅ **Standard**: Supported by VSCode, Augment, and most MCP clients
+
+**Alternative (Hardcoded Path)**:
+If your MCP client doesn't support `${workspaceFolder}`, use an absolute path:
 
 ```json
 {
@@ -633,6 +661,8 @@ Error: The system cannot find the path specified:
 ```
 
 **After Adding `cwd`**: All file operations work correctly with relative paths.
+
+**📚 For More Details**: See [MCP_PATH_CONFIGURATION_GUIDE.md](MCP_PATH_CONFIGURATION_GUIDE.md) for comprehensive path configuration options.
 
 #### Core Configuration
 - `LM_STUDIO_URL` - LM Studio API endpoint (default: http://localhost:1234)

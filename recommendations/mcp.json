@@ -1,10 +1,11 @@
 {
+  "description": "Jarvis MCP Server Configuration - Uses ${workspaceFolder} for automatic path resolution",
   "mcpServers": {
     "jarvis": {
       "type": "stdio",
       "command": "py",
-      "args": ["-3", "-u", "C:/Users/mfeth/.mcp-servers/lmstudio-mcp/server.py"],
-      "cwd": "C:/Users/mfeth/.mcp-servers/lmstudio-mcp",
+      "args": ["-3", "-u", "${workspaceFolder}/server.py"],
+      "cwd": "${workspaceFolder}",
       "env": {
         "ALLOWED_BASE_DIRS": "C:\\Users\\mfeth\\.mcp-servers\\lmstudio-mcp;E:\\Projects\\generative_flow",
         "LM_STUDIO_URL": "http://localhost:1234",
