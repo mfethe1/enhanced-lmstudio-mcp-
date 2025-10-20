@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 
-from server import _compact_text, _safe_path, _task_store, _new_task_id, _spawn_thread
+from core.utils import _compact_text, _safe_path, _task_store, _new_task_id, _spawn_thread
 
 # Note: This handler requires the Firecrawl MCP tool to be available in this environment.
 # It performs multi-round deep research exclusively via the MCP tool, without HTTP fallbacks.
@@ -96,7 +96,7 @@ def _agent_followups(server, query: str, prior_facts: str, round_index: int, max
     # Preferred: CrewAI Agent using per-role backend selection
     try:
         from crewai import Agent, Crew, Task  # type: ignore
-        from server import _decide_backend_for_role, _build_llm_for_backend
+        from core.crewai_utils import _decide_backend_for_role, _build_llm_for_backend
         backend = _decide_backend_for_role("Planner", "deep_research")
         llm = _build_llm_for_backend(backend)
         base_kwargs = {"allow_delegation": False, "verbose": False}
@@ -252,8 +252,18 @@ def handle_deep_research(arguments: Dict[str, Any], server) -> str:
         raise Exception("'query' is required")
 
     for r in range(len(all_rounds)+1, len(all_rounds)+rounds+1):
-        # 1) Run Firecrawl round
-        stage = asyncio.get_event_loop().run_until_complete(_firecrawl_round(query, max_depth, time_limit))
+        # 1) Run Firecrawl round (robust to missing event loop in threadpool)
+        try:
+            stage = asyncio.get_event_loop().run_until_complete(_firecrawl_round(query, max_depth, time_limit))
+        except RuntimeError:
+            loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
+            try:
+                stage = loop.run_until_complete(_firecrawl_round(query, max_depth, time_limit))
+            finally:
+                try:
+                    loop.close()
+                except Exception:
+                    pass
         final = stage.get("final") or ""
         round_art = {"round": r, "query": query, "final": final, "raw": stage.get("raw")}
         _store_artifact(server, research_id, round_art, f"round{r}")

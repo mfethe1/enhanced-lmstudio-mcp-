@@ -11,6 +11,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+# Global singleton instance to prevent multiple orchestrators
+_global_orchestrator_instance = None
+_orchestrator_lock = threading.Lock()
+
 
 @dataclass
 class ResearchTopic:
@@ -32,6 +36,13 @@ class ProactiveResearchOrchestrator:
     """
 
     def __init__(self, storage, server, interval_seconds: int | None = None) -> None:
+        # Check if proactive research is disabled
+        if not self._is_enabled():
+            logger.info("Proactive research disabled via environment variable")
+            self._disabled = True
+            return
+
+        self._disabled = False
         self.storage = storage
         self.server = server  # for calling route_chat and deep_research handler
         self.interval_seconds = interval_seconds or int(
@@ -59,8 +70,24 @@ class ProactiveResearchOrchestrator:
         self._fc_search = _fc_search
         self._fc_deep = _fc_deep
 
+    @staticmethod
+    def _is_enabled() -> bool:
+        """Check if proactive research is enabled via environment variables"""
+        import os
+        enabled = os.getenv('PROACTIVE_RESEARCH_ENABLED', '1').lower()
+        if enabled in ('0', 'false', 'no', 'off', 'disabled'):
+            return False
+
+        interval = int(os.getenv('PROACTIVE_RESEARCH_INTERVAL_SEC', '0') or '0')
+        if interval == 0:
+            return False
+
+        return True
+
     # --- Public control API ---
     def start_background(self) -> None:
+        if self._disabled:
+            return
         if self._running:
             return
         self._running = True
@@ -78,7 +105,24 @@ class ProactiveResearchOrchestrator:
             logger.info("ProactiveResearchOrchestrator started in background thread")
 
     def stop(self) -> None:
+        """Gracefully stop the background research orchestrator"""
+        if self._disabled:
+            return
+
         self._running = False
+
+        # Wait for background thread to finish if it exists
+        if self._bg_thread and self._bg_thread.is_alive():
+            try:
+                self._bg_thread.join(timeout=5.0)
+                if self._bg_thread.is_alive():
+                    logger.warning("Background research thread did not stop within 5s")
+                else:
+                    logger.info("Background research thread stopped gracefully")
+            except Exception as e:
+                logger.warning(f"Error stopping background research thread: {e}")
+
+        self._bg_thread = None
 
     def enqueue(self, topic: str, score: float = 0.6, source: str = "manual") -> None:
         self._queue.append(ResearchTopic(topic=topic.strip(), score=score, source=source))
@@ -212,7 +256,24 @@ class ProactiveResearchOrchestrator:
         except Exception as e:  # pragma: no cover
             raise RuntimeError(f"deep_research unavailable: {e}")
         # Ensure handler return is str; coerce if it returns JSON-like structure
-        out = handle_deep_research({"query": topic, "time_limit": 180, "max_depth": 4}, self.server)
+        try:
+            out = handle_deep_research({"query": topic, "time_limit": 180, "max_depth": 4}, self.server)
+            # If the handler returned a coroutine, run it on the server's event loop or a temp loop
+            if inspect.iscoroutine(out):
+                loop = getattr(self.server, "_event_loop", None)
+                if loop and loop.is_running():
+                    from concurrent.futures import TimeoutError as _FutTimeout
+                    fut = asyncio.run_coroutine_threadsafe(out, loop)
+                    try:
+                        out = fut.result(timeout=60)
+                    except _FutTimeout:
+                        raise RuntimeError("deep_research timed out (60s) while awaiting coroutine")
+                else:
+                    # Fallback: create a temporary loop to run the coroutine
+                    out = asyncio.run(out)
+        except Exception as e:
+            logger.warning(f"Proactive research failed for topic '{topic}': {e}")
+            return f"Research failed: {str(e)[:100]}"
         if isinstance(out, dict):
             try:
                 return json.dumps(out)
