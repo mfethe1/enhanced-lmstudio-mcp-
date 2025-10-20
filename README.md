@@ -597,7 +597,42 @@ Example (JSON-RPC tools/call):
    ```
 
 ### Configuration Options
-The server can be configured through environment variables:
+The server can be configured through environment variables and MCP server settings:
+
+#### MCP Server Configuration (IMPORTANT)
+
+**Working Directory**: The MCP server must be configured with the correct working directory to ensure file operations work correctly.
+
+In your `mcp.json` (Augment/Claude Desktop configuration), add the `"cwd"` parameter:
+
+```json
+{
+  "mcpServers": {
+    "jarvis": {
+      "type": "stdio",
+      "command": "py",
+      "args": ["-3", "-u", "C:/Users/YOUR_USERNAME/.mcp-servers/lmstudio-mcp/server.py"],
+      "cwd": "C:/Users/YOUR_USERNAME/.mcp-servers/lmstudio-mcp",
+      "env": {
+        // ... environment variables ...
+      }
+    }
+  }
+}
+```
+
+**Why This Matters**:
+- Without `"cwd"`, the MCP server uses VSCode's installation directory as the working directory
+- This causes file operations like `list_directory("scripts")` to fail with path errors
+- Setting `"cwd"` ensures all relative paths are resolved correctly
+
+**Common Error Without `cwd`**:
+```
+Error: The system cannot find the path specified:
+'C:\Users\mfeth\AppData\Local\Programs\Microsoft VS Code\scripts'
+```
+
+**After Adding `cwd`**: All file operations work correctly with relative paths.
 
 #### Core Configuration
 - `LM_STUDIO_URL` - LM Studio API endpoint (default: http://localhost:1234)
