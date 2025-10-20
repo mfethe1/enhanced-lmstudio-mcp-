@@ -1,13 +1,17 @@
 {
-  "description": "Jarvis MCP Server Configuration - Uses ${workspaceFolder} for automatic path resolution",
+  "description": "Jarvis MCP Server Configuration - Server location is fixed, working directory follows workspace",
   "mcpServers": {
     "jarvis": {
       "type": "stdio",
       "command": "py",
-      "args": ["-3", "-u", "${workspaceFolder}/server.py"],
+      "args": [
+        "-3",
+        "-u",
+        "C:/Users/mfeth/.mcp-servers/lmstudio-mcp/server.py"
+      ],
       "cwd": "${workspaceFolder}",
       "env": {
-        "ALLOWED_BASE_DIRS": "C:\\Users\\mfeth\\.mcp-servers\\lmstudio-mcp;E:\\Projects\\generative_flow",
+        "ALLOWED_BASE_DIRS": "${workspaceFolder};C:/Users/mfeth/.mcp-servers/lmstudio-mcp;E:/Projects",
         "LM_STUDIO_URL": "http://localhost:1234",
         "LMSTUDIO_API_BASE": "http://localhost:1234/v1",
         "MODEL_NAME": "openai/gpt-oss-20b",
