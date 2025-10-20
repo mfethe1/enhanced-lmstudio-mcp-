@@ -4,6 +4,7 @@
       "type": "stdio",
       "command": "py",
       "args": ["-3", "-u", "C:/Users/mfeth/.mcp-servers/lmstudio-mcp/server.py"],
+      "cwd": "C:/Users/mfeth/.mcp-servers/lmstudio-mcp",
       "env": {
         "ALLOWED_BASE_DIRS": "C:\\Users\\mfeth\\.mcp-servers\\lmstudio-mcp;E:\\Projects\\generative_flow",
         "LM_STUDIO_URL": "http://localhost:1234",
@@ -60,17 +61,17 @@
         "OPENAI_API_BASE": "https://api.openai.com/v1",
 
         "OPENAI_BASE_URL": "https://api.openai.com/v1",
-        "ANTHROPIC_MODEL": "claude-4-sonnet-latest",
+        "ANTHROPIC_MODEL": "claude-haiku-4-5",
         "ANTHROPIC_BASE_URL": "https://api.anthropic.com/v1",
         "ANTHROPIC_VERSION": "2023-06-01",
         "OVERSEER_USE_OPUS": "1",
-        "ANTHROPIC_MODEL_OVERSEER": "claude-4-opus-latest",
+        "ANTHROPIC_MODEL_OVERSEER": "claude-opus-4-1",
         "ANTHROPIC_SMART_SWITCH": "1",
         "OPUS_FOR_ANALYSIS": "1",
         "NO_FALLBACK_PROVIDERS": "1",
         "OPUS_FOR_LOW_CONF": "1",
         "LOW_CONF_THRESHOLD": "0.5",
-        "ANTHROPIC_MODEL_COMPLEX": "claude-4-sonnet-latest",
+        "ANTHROPIC_MODEL_COMPLEX": "claude-sonnet-4-5",
 
         "USE_HYBRID_RETRIEVAL": "1",
         "ENABLE_KG_INGESTION": "1",
