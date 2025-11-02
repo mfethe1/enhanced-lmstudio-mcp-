@@ -66,7 +66,7 @@
         "OPENAI_API_BASE": "https://api.openai.com/v1",
 
         "OPENAI_BASE_URL": "https://api.openai.com/v1",
-        "ANTHROPIC_MODEL": "claude-haiku-4-5",
+        "ANTHROPIC_MODEL": "claude-sonnet-4-5",
         "ANTHROPIC_BASE_URL": "https://api.anthropic.com/v1",
         "ANTHROPIC_VERSION": "2023-06-01",
         "OVERSEER_USE_OPUS": "1",
@@ -76,7 +76,7 @@
         "NO_FALLBACK_PROVIDERS": "1",
         "OPUS_FOR_LOW_CONF": "1",
         "LOW_CONF_THRESHOLD": "0.5",
-        "ANTHROPIC_MODEL_COMPLEX": "claude-sonnet-4-5",
+        "ANTHROPIC_MODEL_COMPLEX": "claude-opus-4-1",
 
         "USE_HYBRID_RETRIEVAL": "1",
         "ENABLE_KG_INGESTION": "1",
