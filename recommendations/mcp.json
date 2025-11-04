@@ -1,11 +1,17 @@
 {
+  "description": "Jarvis MCP Server Configuration - Server location is fixed, working directory follows workspace",
   "mcpServers": {
-    "strands": {
+    "jarvis": {
       "type": "stdio",
       "command": "py",
-      "args": ["-3", "-u", "C:/Users/mfeth/.mcp-servers/lmstudio-mcp/server.py"],
+      "args": [
+        "-3",
+        "-u",
+        "C:/Users/mfeth/.mcp-servers/lmstudio-mcp/server.py"
+      ],
+      "cwd": "${workspaceFolder}",
       "env": {
-        "ALLOWED_BASE_DIR": "C:\\Users\\mfeth\\.mcp-servers\\lmstudio-mcp",
+        "ALLOWED_BASE_DIRS": "${workspaceFolder};C:/Users/mfeth/.mcp-servers/lmstudio-mcp;E:/Projects",
         "LM_STUDIO_URL": "http://localhost:1234",
         "LMSTUDIO_API_BASE": "http://localhost:1234/v1",
         "MODEL_NAME": "openai/gpt-oss-20b",
@@ -20,45 +26,71 @@
         "ROUTER_USE_AGENT": "1",
         "ROUTER_RATE_LIMIT_TPS": "12",
         "SMART_TASK_MAX_REFINES": "5",
-        "SMART_PLAN_IMMEDIATE_TIMEOUT_SEC": "150",
-        "ROUTER_BG_TIMEOUT_SEC": "300",
+        "SMART_PLAN_IMMEDIATE_TIMEOUT_SEC": "360",
+        "ROUTER_BG_TIMEOUT_SEC": "500",
         "ADAPTIVE_ROUTER_ENABLED": "1",
         "ROUTER_METRICS_WINDOW": "200",
-        "CREW_TOOL_TIMEOUT": "45",
+        "CREW_TOOL_TIMEOUT": "420",
 
+        "EPHEMERAL_MAX_AGENTS": "10",
+        "EPHEMERAL_DEFAULT_LIFETIME": "300",
+        "EPHEMERAL_CLEANUP_INTERVAL": "60",
 
+        "FILE_LOCK_TIMEOUT": "30",
+        "FILE_LOCK_MAX_LOCKS": "100",
 
-        "HTTP_CONNECT_TIMEOUT": "2",
-        "HTTP_READ_TIMEOUT_SIMPLE": "8",
-        "HTTP_READ_TIMEOUT_COMPLEX": "45",
-        "HTTP_MAX_RETRIES": "3",
-        "HTTP_BACKOFF_FACTOR": "1.5",
+        "WORKFLOW_TIMEOUT": "300",
+        "WORKFLOW_MAX_PARALLEL": "10",
+
+        "SWARM_TASK_TIMEOUT": "60",
+        "SWARM_MAX_AGENTS": "20",
+        "SWARM_HANDOFF_TIMEOUT": "30",
+        "SWARM_MESSAGE_TIMEOUT": "30",
+
+        "HTTP_CONNECT_TIMEOUT": "10",
+        "HTTP_READ_TIMEOUT_SIMPLE": "200",
+        "HTTP_READ_TIMEOUT_COMPLEX": "500",
+        "HTTP_MAX_RETRIES": "2",
+        "HTTP_BACKOFF_FACTOR": "1.2",
         "MCP_OPTIMIZER": "1",
         "METRICS_EXPORTER": "1",
         "METRICS_BIND": "127.0.0.1:9099",
 
         "LMSTUDIO_FUNCTION_MODEL": "openai/gpt-oss-20b",
+        "ASYNC_EXECUTOR_TIMEOUT": "500",
         "TOOLCALL_DEFAULT_TEMPERATURE": "0.15",
         "TOOLCALL_TOOL_CHOICE_DEFAULT": "auto",
 
-        "OPENAI_MODEL": "gpt-4o",
+        "OPENAI_MODEL": "gpt-5",
+        "OPENAI_FALLBACK_MODEL": "gpt-5",
         "OPENAI_API_BASE": "https://api.openai.com/v1",
 
         "OPENAI_BASE_URL": "https://api.openai.com/v1",
-        "ANTHROPIC_MODEL": "claude-3-5-sonnet-latest",
+        "ANTHROPIC_MODEL": "claude-sonnet-4-5",
         "ANTHROPIC_BASE_URL": "https://api.anthropic.com/v1",
         "ANTHROPIC_VERSION": "2023-06-01",
         "OVERSEER_USE_OPUS": "1",
-        "ANTHROPIC_MODEL_OVERSEER": "claude-3-opus-latest",
+        "ANTHROPIC_MODEL_OVERSEER": "claude-opus-4-1",
         "ANTHROPIC_SMART_SWITCH": "1",
         "OPUS_FOR_ANALYSIS": "1",
+        "NO_FALLBACK_PROVIDERS": "1",
         "OPUS_FOR_LOW_CONF": "1",
         "LOW_CONF_THRESHOLD": "0.5",
-        "ANTHROPIC_MODEL_COMPLEX": "claude-3-opus-latest",
+        "ANTHROPIC_MODEL_COMPLEX": "claude-opus-4-1",
 
         "USE_HYBRID_RETRIEVAL": "1",
         "ENABLE_KG_INGESTION": "1",
-        "ENABLE_WEB_AUGMENTATION": "1"
+        "ENABLE_WEB_AUGMENTATION": "1",
+        "FIRECRAWL_API_KEY": "${FIRECRAWL_API_KEY}",
+
+        "USE_BEDROCK": "0",
+        "CIRCUIT_LMSTUDIO_THRESHOLD": "10",
+        "CIRCUIT_LMSTUDIO_RECOVERY": "180",
+        "CIRCUIT_OPENAI_THRESHOLD": "6",
+        "CIRCUIT_OPENAI_RECOVERY": "90",
+        "CIRCUIT_ANTHROPIC_THRESHOLD": "6",
+        "CIRCUIT_ANTHROPIC_RECOVERY": "90",
+        "BEDROCK_REGION": "us-east-1"
       }
     }
   }
