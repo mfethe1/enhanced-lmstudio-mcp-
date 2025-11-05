@@ -1,0 +1,333 @@
+{
+  "core_mcp": {
+    "health_check": {
+      "tool": "health_check",
+      "status": "success",
+      "response_time_ms": 0,
+      "error": null,
+      "response_type": "dict",
+      "response_length": 221
+    },
+    "get_version": {
+      "tool": "get_version",
+      "status": "success",
+      "response_time_ms": 0,
+      "error": null,
+      "response_type": "dict",
+      "response_length": 132
+    },
+    "router_config": {
+      "tool": "router_config",
+      "status": "success",
+      "response_time_ms": 0,
+      "error": null,
+      "response_type": "dict",
+      "response_length": 443
+    },
+    "router_diagnostics": {
+      "tool": "router_diagnostics",
+      "status": "success",
+      "response_time_ms": 3,
+      "error": null,
+      "response_type": "dict",
+      "response_length": 1940
+    },
+    "router_test": {
+      "tool": "router_test",
+      "status": "success",
+      "response_time_ms": 5,
+      "error": null,
+      "response_type": "str",
+      "response_length": 120
+    },
+    "router_battery": {
+      "tool": "router_battery",
+      "status": "success",
+      "response_time_ms": 263,
+      "error": null,
+      "response_type": "str",
+      "response_length": 3807
+    },
+    "performance_stats": {
+      "tool": "performance_stats",
+      "status": "success",
+      "response_time_ms": 1,
+      "error": null,
+      "response_type": "str",
+      "response_length": 47
+    }
+  },
+  "smart_tools": {
+    "smart_task": {
+      "tool": "smart_task",
+      "status": "success",
+      "response_time_ms": 0,
+      "error": null,
+      "response_type": "str",
+      "response_length": 378
+    },
+    "smart_plan_execute": {
+      "tool": "smart_plan_execute",
+      "status": "success",
+      "response_time_ms": 1630,
+      "error": null,
+      "response_type": "str",
+      "response_length": 82
+    },
+    "chat_with_tools": {
+      "tool": "chat_with_tools",
+      "status": "success",
+      "response_time_ms": 12034,
+      "error": null,
+      "response_type": "dict",
+      "response_length": 168
+    }
+  },
+  "memory_storage": {
+    "memory_store": {
+      "tool": "memory_store",
+      "status": "success",
+      "response_time_ms": 6,
+      "error": null,
+      "response_type": "str",
+      "response_length": 57
+    },
+    "memory_retrieve": {
+      "tool": "memory_retrieve",
+      "status": "success",
+      "response_time_ms": 2,
+      "error": null,
+      "response_type": "str",
+      "response_length": 85
+    },
+    "memory_retrieve_semantic": {
+      "tool": "memory_retrieve_semantic",
+      "status": "success",
+      "response_time_ms": 1,
+      "error": null,
+      "response_type": "dict",
+      "response_length": 1376
+    },
+    "memory_consolidate": {
+      "tool": "memory_consolidate",
+      "status": "success",
+      "response_time_ms": 12,
+      "error": null,
+      "response_type": "dict",
+      "response_length": 100
+    }
+  },
+  "research_analysis": {
+    "web_search": {
+      "tool": "web_search",
+      "status": "success",
+      "response_time_ms": 6864,
+      "error": null,
+      "response_type": "str",
+      "response_length": 358
+    },
+    "deep_research": {
+      "tool": "deep_research",
+      "status": "success",
+      "response_time_ms": 221,
+      "error": null,
+      "response_type": "str",
+      "response_length": 358
+    },
+    "get_research_details": {
+      "tool": "get_research_details",
+      "status": "success",
+      "response_time_ms": 1,
+      "error": null,
+      "response_type": "str",
+      "response_length": 33
+    },
+    "propose_research": {
+      "tool": "propose_research",
+      "status": "success",
+      "response_time_ms": 14561,
+      "error": null,
+      "response_type": "str",
+      "response_length": 304
+    },
+    "proactive_research_status": {
+      "tool": "proactive_research_status",
+      "status": "success",
+      "response_time_ms": 0,
+      "error": null,
+      "response_type": "str",
+      "response_length": 51
+    }
+  },
+  "development": {
+    "cognitive_codegen_one_shot": {
+      "tool": "cognitive_codegen_one_shot",
+      "status": "success",
+      "response_time_ms": 3,
+      "error": null,
+      "response_type": "dict",
+      "response_length": 112
+    },
+    "file_scaffold": {
+      "tool": "file_scaffold",
+      "status": "error",
+      "response_time_ms": 0,
+      "error": "path and kind ('module'|'test') are required",
+      "response_type": null,
+      "response_length": 0
+    },
+    "code_hotspots": {
+      "tool": "code_hotspots",
+      "status": "success",
+      "response_time_ms": 100,
+      "error": null,
+      "response_type": "str",
+      "response_length": 298
+    },
+    "import_graph": {
+      "tool": "import_graph",
+      "status": "success",
+      "response_time_ms": 89,
+      "error": null,
+      "response_type": "str",
+      "response_length": 62
+    },
+    "tdd_flow": {
+      "tool": "tdd_flow",
+      "status": "error",
+      "response_time_ms": 1935,
+      "error": "Object of type ValidationIssue is not JSON serializable",
+      "response_type": null,
+      "response_length": 0
+    }
+  },
+  "workflow": {
+    "workflow_create": {
+      "tool": "workflow_create",
+      "status": "success",
+      "response_time_ms": 5,
+      "error": null,
+      "response_type": "dict",
+      "response_length": 32
+    },
+    "workflow_add_node": {
+      "tool": "workflow_add_node",
+      "status": "error",
+      "response_time_ms": 0,
+      "error": "workflow_id, node_type, and name are required",
+      "response_type": null,
+      "response_length": 0
+    },
+    "workflow_connect_nodes": {
+      "tool": "workflow_connect_nodes",
+      "status": "error",
+      "response_time_ms": 0,
+      "error": "workflow_id, source_node_id, target_node_id are required",
+      "response_type": null,
+      "response_length": 0
+    },
+    "workflow_execute": {
+      "tool": "workflow_execute",
+      "status": "error",
+      "response_time_ms": 2,
+      "error": "workflow not found",
+      "response_type": null,
+      "response_length": 0
+    },
+    "workflow_explain": {
+      "tool": "workflow_explain",
+      "status": "error",
+      "response_time_ms": 0,
+      "error": "workflow not found",
+      "response_type": null,
+      "response_length": 0
+    }
+  },
+  "session_management": {
+    "session_create": {
+      "tool": "session_create",
+      "status": "error",
+      "response_time_ms": 0,
+      "error": "initial_task is required",
+      "response_type": null,
+      "response_length": 0
+    },
+    "context_envelope_create": {
+      "tool": "context_envelope_create",
+      "status": "success",
+      "response_time_ms": 3,
+      "error": null,
+      "response_type": "dict",
+      "response_length": 40
+    },
+    "artifact_create": {
+      "tool": "artifact_create",
+      "status": "error",
+      "response_time_ms": 0,
+      "error": "session_id, artifact_type, title, content, contributors required",
+      "response_type": null,
+      "response_length": 0
+    },
+    "session_analytics": {
+      "tool": "session_analytics",
+      "status": "success",
+      "response_time_ms": 1,
+      "error": null,
+      "response_type": "dict",
+      "response_length": 17
+    }
+  },
+  "thinking": {
+    "sequential_thinking": {
+      "tool": "sequential_thinking",
+      "status": "success",
+      "response_time_ms": 11,
+      "error": null,
+      "response_type": "dict",
+      "response_length": 165
+    },
+    "get_thinking_session": {
+      "tool": "get_thinking_session",
+      "status": "success",
+      "response_time_ms": 2,
+      "error": null,
+      "response_type": "dict",
+      "response_length": 35
+    },
+    "summarize_thinking_session": {
+      "tool": "summarize_thinking_session",
+      "status": "success",
+      "response_time_ms": 0,
+      "error": null,
+      "response_type": "dict",
+      "response_length": 58
+    }
+  },
+  "strands_integration": {
+    "status": "success",
+    "components_tested": [
+      "TeamOrchestrator",
+      "KGIngestionEngine",
+      "SelectionRouter",
+      "HybridRetriever"
+    ],
+    "integration_healthy": true
+  },
+  "summary": {
+    "total_tests": 36,
+    "passed_tests": 28,
+    "failed_tests": 8,
+    "success_rate": 77.77777777777779,
+    "audit_time_seconds": 37.78,
+    "strands_integration": {
+      "status": "success",
+      "components_tested": [
+        "TeamOrchestrator",
+        "KGIngestionEngine",
+        "SelectionRouter",
+        "HybridRetriever"
+      ],
+      "integration_healthy": true
+    }
+  }
+}

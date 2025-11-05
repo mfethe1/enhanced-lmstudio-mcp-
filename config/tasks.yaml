@@ -1,0 +1,23 @@
+# Task expectations per stage. These can be used by CrewAI tasks' expected_output
+requirements_analyst:
+  expected_output: |
+    A concise, structured set of requirements and acceptance criteria (bulleted),
+    including assumptions, risks, and testability notes.
+architect:
+  expected_output: |
+    A high-level architecture outline with components, data flow, and key interfaces
+    and a short rationale for trade-offs.
+coder:
+  expected_output: |
+    A summary of the implementation approach and any key code excerpts or diffs.
+test_engineer:
+  expected_output: |
+    A list of unit/integration tests (names and purposes) and minimal code snippets
+    for critical tests.
+performance_tuner:
+  expected_output: |
+    A brief profiling plan or findings and specific changes to improve P50/P99 latency.
+security_auditor:
+  expected_output: |
+    Identified risks, recommended mitigations, and a pass/fail assessment w/ notes.
+

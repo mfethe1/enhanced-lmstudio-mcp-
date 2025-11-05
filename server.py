@@ -467,7 +467,7 @@ except Exception as e:
 def _register_all_handlers(server):
     """Register all modular handlers with the registry"""
     try:
-        from handlers import research, agent_teams, memory, code_tools, workflow, audit, swarm
+        from handlers import research, agent_teams, memory, code_tools, workflow, audit, swarm, quality_gate_handlers
     except Exception:
         return
     if getattr(server, "registry", None) is None:
@@ -588,6 +588,13 @@ def _register_all_handlers(server):
     server.registry.register("audit_add_rule", audit.handle_audit_add_rule, needs_server=True)
     server.registry.register("audit_compliance_report", audit.handle_audit_compliance_report, needs_server=True)
     server.registry.register("audit_review_action", audit.handle_audit_review_action, needs_server=True)
+    # Quality Gates (Phase 3.1)
+    try:
+        server.registry.register("evaluate_quality", quality_gate_handlers.handle_evaluate_quality, needs_server=True)
+        server.registry.register("enforce_quality_gate", quality_gate_handlers.handle_enforce_quality_gate, needs_server=True)
+        server.registry.register("get_quality_stats", quality_gate_handlers.handle_get_quality_stats, needs_server=True)
+    except Exception as e:
+        logger.warning(f"Failed to register quality gates handlers: {e}")
     # System/Router/Session (keep in server.py implementation)
     # Note: These functions are defined later in the file, so we'll register them in get_server_singleton
     # server.registry.register("health_check", handle_health_check, needs_server=True)
@@ -2190,6 +2197,44 @@ def get_all_tools():
                         "limit": {"type": "integer", "description": "Maximum number of log entries", "default": 100}
                     },
                     "required": ["task_id"]
+                }
+            },
+
+            # Quality Gates (Phase 3.1)
+            {
+                "name": "evaluate_quality",
+                "description": "Evaluate output against quality criteria (completeness, correctness, clarity).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "output": {"type": "string", "description": "The output to evaluate"},
+                        "gate_name": {"type": "string", "description": "Quality gate to use (default, strict)", "default": "default"},
+                        "context": {"type": "object", "description": "Optional context for evaluation"}
+                    },
+                    "required": ["output"]
+                }
+            },
+            {
+                "name": "enforce_quality_gate",
+                "description": "Enforce quality gate with iterative refinement using LLM until standards met.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "output": {"type": "string", "description": "The output to enforce quality on"},
+                        "gate_name": {"type": "string", "description": "Quality gate to use (default, strict)", "default": "default"},
+                        "max_retries": {"type": "integer", "description": "Maximum refinement attempts", "default": 3},
+                        "refinement_instructions": {"type": "string", "description": "Additional instructions for refinement"},
+                        "context": {"type": "object", "description": "Optional context for evaluation and refinement"}
+                    },
+                    "required": ["output"]
+                }
+            },
+            {
+                "name": "get_quality_stats",
+                "description": "Get statistics for all quality gates (pass rate, evaluation count, performance).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
                 }
             }
         ]

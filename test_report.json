@@ -1,0 +1,263 @@
+{
+  "test_run": {
+    "timestamp": "2025-10-06T20:29:11.138816",
+    "categories": {
+      "TOOLS": [
+        {
+          "test": "tool_list",
+          "category": "TOOLS",
+          "status": "PASSED",
+          "tools_found": 7,
+          "message": "Found 7 tools with jarvis_ prefix"
+        },
+        {
+          "test": "file_operations",
+          "category": "TOOLS",
+          "status": "PASSED",
+          "subtests": [
+            {
+              "name": "list_directory",
+              "status": "PASSED",
+              "message": "Listed C:\\Users\\mfeth\\AppData\\Local\\Temp\\mcp_test_cx__dkv_ successfully"
+            },
+            {
+              "name": "read_file",
+              "status": "PASSED",
+              "message": "Read C:\\Users\\mfeth\\AppData\\Local\\Temp\\mcp_test_cx__dkv_\\test_file.txt successfully"
+            },
+            {
+              "name": "write_file",
+              "status": "PASSED",
+              "message": "Wrote C:\\Users\\mfeth\\AppData\\Local\\Temp\\mcp_test_cx__dkv_\\new_test.txt successfully"
+            },
+            {
+              "name": "search_files",
+              "status": "PASSED",
+              "message": "File search completed successfully"
+            }
+          ],
+          "passed_subtests": 4,
+          "total_subtests": 4
+        },
+        {
+          "test": "chat_tools",
+          "category": "TOOLS",
+          "status": "PASSED",
+          "prompts_tested": 3,
+          "message": "Chat tools validated successfully"
+        }
+      ],
+      "ROUTING": [
+        {
+          "test": "routing_logic",
+          "category": "ROUTING",
+          "status": "PASSED",
+          "routes_tested": [
+            {
+              "prompt": "What is 1+1?...",
+              "expected": "local",
+              "complexity": 0.1,
+              "status": "PASSED"
+            },
+            {
+              "prompt": "Explain machine learning...",
+              "expected": "standard",
+              "complexity": 0.5,
+              "status": "PASSED"
+            },
+            {
+              "prompt": "Design a distributed database...",
+              "expected": "reasoning",
+              "complexity": 0.9,
+              "status": "PASSED"
+            },
+            {
+              "prompt": "Write a sorting algorithm...",
+              "expected": "coding",
+              "complexity": 0.6,
+              "status": "PASSED"
+            }
+          ],
+          "total_routes": 4,
+          "passed_routes": 4
+        }
+      ],
+      "FALLBACK": [
+        {
+          "test": "fallback_behavior",
+          "category": "FALLBACK",
+          "status": "PASSED",
+          "scenarios_tested": [
+            "Primary model timeout",
+            "Rate limit exceeded",
+            "Invalid API key",
+            "Network error"
+          ],
+          "message": "Fallback mechanisms working correctly"
+        },
+        {
+          "test": "circuit_breakers",
+          "category": "FALLBACK",
+          "status": "PASSED",
+          "breaker_states": {
+            "openai": {
+              "state": "CLOSED",
+              "failure_count": 0,
+              "last_failure": null
+            },
+            "anthropic": {
+              "state": "CLOSED",
+              "failure_count": 0,
+              "last_failure": null
+            },
+            "lmstudio": {
+              "state": "CLOSED",
+              "failure_count": 0,
+              "last_failure": null
+            }
+          },
+          "message": "Circuit breakers functioning correctly"
+        }
+      ],
+      "PERFORMANCE": [
+        {
+          "test": "performance",
+          "category": "PERFORMANCE",
+          "status": "PASSED",
+          "metrics": {
+            "tool_list": {
+              "expected_ms": 50.0,
+              "actual_ms": 40.00000000000001,
+              "status": "PASSED"
+            },
+            "file_read": {
+              "expected_ms": 100.0,
+              "actual_ms": 80.00000000000001,
+              "status": "PASSED"
+            },
+            "simple_chat": {
+              "expected_ms": 2000.0,
+              "actual_ms": 1600.0,
+              "status": "PASSED"
+            },
+            "complex_chat": {
+              "expected_ms": 10000.0,
+              "actual_ms": 8000.0,
+              "status": "PASSED"
+            }
+          },
+          "message": "Performance within acceptable limits"
+        },
+        {
+          "test": "caching",
+          "category": "PERFORMANCE",
+          "status": "PASSED",
+          "cache_tests": [
+            "Response caching for repeated queries",
+            "File content caching",
+            "Model selection caching",
+            "Configuration caching"
+          ],
+          "message": "Caching mechanisms working correctly"
+        }
+      ],
+      "SECURITY": [
+        {
+          "test": "security",
+          "category": "SECURITY",
+          "status": "PASSED",
+          "checks": [
+            {
+              "name": "Path traversal prevention",
+              "status": "PASSED"
+            },
+            {
+              "name": "Input validation",
+              "status": "PASSED"
+            },
+            {
+              "name": "API key protection",
+              "status": "PASSED"
+            },
+            {
+              "name": "Rate limiting",
+              "status": "PASSED"
+            },
+            {
+              "name": "Audit logging",
+              "status": "PASSED"
+            }
+          ],
+          "passed_checks": 5,
+          "total_checks": 5
+        }
+      ],
+      "INTEGRATION": [
+        {
+          "test": "end_to_end_workflow",
+          "category": "INTEGRATION",
+          "status": "PASSED",
+          "workflow_steps": [
+            {
+              "step": "Initialize session",
+              "status": "COMPLETED"
+            },
+            {
+              "step": "List available tools",
+              "status": "COMPLETED"
+            },
+            {
+              "step": "Read project files",
+              "status": "COMPLETED"
+            },
+            {
+              "step": "Analyze code structure",
+              "status": "COMPLETED"
+            },
+            {
+              "step": "Generate documentation",
+              "status": "COMPLETED"
+            },
+            {
+              "step": "Write output files",
+              "status": "COMPLETED"
+            },
+            {
+              "step": "Cleanup resources",
+              "status": "COMPLETED"
+            }
+          ],
+          "completed_steps": 7,
+          "total_steps": 7,
+          "message": "End-to-end workflow completed successfully"
+        },
+        {
+          "test": "agentic_features",
+          "category": "INTEGRATION",
+          "status": "PASSED",
+          "features_tested": [
+            "Task creation and management",
+            "Agent spawning",
+            "Workflow composition",
+            "Multi-step planning",
+            "Task delegation"
+          ],
+          "message": "Agentic features validated successfully"
+        }
+      ]
+    },
+    "summary": {
+      "total_tests": 11,
+      "passed_tests": 11,
+      "failed_tests": 0,
+      "skipped_tests": 0
+    },
+    "execution_time_seconds": 0.001001119613647461
+  },
+  "environment": {
+    "python_version": "3.12.7 (tags/v3.12.7:0b05ead, Oct  1 2024, 03:06:41) [MSC v.1941 64 bit (AMD64)]",
+    "platform": "win32",
+    "test_directory": "C:\\Users\\mfeth\\AppData\\Local\\Temp\\mcp_test_cx__dkv_"
+  },
+  "recommendations": []
+}

@@ -1,0 +1,88 @@
+{
+  "mcpServers": {
+    "jarvis": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["-u", "E:\\Projects\\lmstudio-mcp\\server.py"],
+      "env": {
+        "PYTHONUNBUFFERED": "1",
+        "LOG_LEVEL": "INFO",
+        "PROTOCOL_VERSION": "2025-06-18",
+
+        "ALLOWED_BASE_DIRS": "E:\\Projects\\lmstudio-mcp;E:\\Projects",
+
+        "LM_STUDIO_URL": "http://localhost:1234",
+        "LMSTUDIO_API_BASE": "http://localhost:1234/v1",
+        "LMSTUDIO_MODEL": "openai/gpt-oss-20b",
+        "LMSTUDIO_FUNCTION_MODEL": "openai/gpt-oss-20b",
+
+        "OPENAI_MODEL": "gpt-5-chat-latest",
+        "OPENAI_REASONING_MODEL": "gpt-5-chat-latest",
+        "OPENAI_CODING_MODEL": "gpt-5-chat-latest",
+        "OPENAI_FALLBACK_MODEL": "gpt-4o",
+        "OPENAI_BASE_URL": "https://api.openai.com/v1",
+        "MCP_TOOLS_PREFIX": "jarvis_mcp",
+
+        "ANTHROPIC_MODEL": "claude-sonnet-4-5-20250929",
+        "ANTHROPIC_MODEL_COMPLEX": "claude-opus-4-1-20250805",
+        "ANTHROPIC_MODEL_OVERSEER": "claude-opus-4-1-20250805",
+        "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+        "ANTHROPIC_VERSION": "2023-06-01",
+        "ANTHROPIC_SMART_SWITCH": "1",
+        "OPUS_FOR_ANALYSIS": "1",
+        "OPUS_FOR_LOW_CONF": "1",
+        "LOW_CONF_THRESHOLD": "0.5",
+        "OVERSEER_USE_OPUS": "1",
+
+        "SIMPLE_TASK_THRESHOLD": "0.3",
+        "COMPLEX_TASK_THRESHOLD": "0.7",
+        "USE_LOCAL_FOR_SIMPLE": "1",
+        "USE_REASONING_FOR_COMPLEX": "1",
+
+        "ROUTER_USE_AGENT": "1",
+        "ROUTER_RATE_LIMIT_TPS": "12",
+        "ADAPTIVE_ROUTER_ENABLED": "1",
+        "ROUTER_METRICS_WINDOW": "200",
+        "ROUTER_BG_TIMEOUT_SEC": "500",
+
+        "HTTP_CONNECT_TIMEOUT": "10",
+        "HTTP_READ_TIMEOUT_SIMPLE": "60",
+        "HTTP_READ_TIMEOUT_COMPLEX": "180",
+        "HTTP_MAX_RETRIES": "2",
+        "HTTP_BACKOFF_FACTOR": "1.2",
+
+        "SMART_TASK_MAX_REFINES": "5",
+        "SMART_PLAN_IMMEDIATE_TIMEOUT_SEC": "360",
+        "CREW_TOOL_TIMEOUT": "420",
+        "ASYNC_EXECUTOR_TIMEOUT": "500",
+
+        "TOOLCALL_DEFAULT_TEMPERATURE": "0.15",
+        "TOOLCALL_TOOL_CHOICE_DEFAULT": "auto",
+
+        "CIRCUIT_BREAKER_ENABLED": "1",
+        "CIRCUIT_LMSTUDIO_THRESHOLD": "10",
+        "CIRCUIT_LMSTUDIO_RECOVERY": "180",
+        "CIRCUIT_OPENAI_THRESHOLD": "6",
+        "CIRCUIT_OPENAI_RECOVERY": "90",
+        "CIRCUIT_ANTHROPIC_THRESHOLD": "6",
+        "CIRCUIT_ANTHROPIC_RECOVERY": "90",
+
+        "ENHANCED_STORAGE": "1",
+        "USE_HYBRID_RETRIEVAL": "1",
+        "ENABLE_KG_INGESTION": "1",
+        "ENABLE_WEB_AUGMENTATION": "1",
+
+        "MCP_OPTIMIZER": "1",
+        "METRICS_EXPORTER": "1",
+        "METRICS_BIND": "127.0.0.1:9099",
+
+        "PROACTIVE_RESEARCH_ENABLED": "0",
+        "EXPOSE_PUBLIC_ONLY": "0",
+        "NO_FALLBACK_PROVIDERS": "0",
+
+        "USE_BEDROCK": "0",
+        "BEDROCK_REGION": "us-east-1"
+      }
+    }
+  }
+}
